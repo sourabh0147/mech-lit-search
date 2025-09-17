@@ -65,6 +65,9 @@ def search_semantic_scholar(query, api_key=None):
             ])
         elif r.status_code == 400:
             return search_semantic_scholar(top_n_terms(query), api_key)
+        elif r.status_code == 429:
+            st.warning("Semantic Scholar API rate limit reached. Showing Crossref results only.")
+            return pd.DataFrame()
         else:
             st.warning(f"Semantic Scholar returned {r.status_code}")
             return pd.DataFrame()
@@ -93,7 +96,9 @@ def search_crossref(query):
                 }
                 for i in items
             ])
-        return pd.DataFrame()
+        else:
+            st.warning(f"Crossref returned {r.status_code}")
+            return pd.DataFrame()
     except Exception as e:
         st.warning(f"Crossref error: {e}")
         return pd.DataFrame()
@@ -102,9 +107,11 @@ def search_crossref(query):
 # Combined Search
 # ---------------------------
 def combined_search(query, api_key=None):
-    df1 = search_semantic_scholar(query, api_key)
-    df2 = search_crossref(query)
-    combined = pd.concat([df1, df2], ignore_index=True)
+    df_ss = search_semantic_scholar(query, api_key)
+    if df_ss.empty:
+        st.info("Semantic Scholar results unavailable, showing Crossref only.")
+    df_cr = search_crossref(query)
+    combined = pd.concat([df_ss, df_cr], ignore_index=True)
     return combined
 
 # ---------------------------
