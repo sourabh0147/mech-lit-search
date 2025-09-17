@@ -203,10 +203,11 @@ def search_pubmed(query):
 # Combined search with incremental display
 # ---------------------------
 def combined_search(query, api_key=None, selected_sources=None, year_range=None, min_citations=None):
-    cached = get_cached_results(query)
-    if not cached.empty:
-        st.info("Showing cached results")
-        df = cached
+            cached = get_cached_results(query)
+        if cached is not None and not cached.empty:
+            st.info(f"Showing cached results ({len(cached)} papers)")
+            display_results(cached)  # display cached results
+            df = cached
     else:
         results_dfs = []
         funcs_map = {
