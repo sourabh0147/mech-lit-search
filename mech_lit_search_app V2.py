@@ -297,16 +297,16 @@ def main():
 
     query = st.text_input("Enter your search query", placeholder="e.g. tribology of magnesium alloys")
     if st.button("🔍 Search"):
-    if query.strip():
-        combined_search(
-            clean_query(query),
-            api_key if config.get("enhanced_mode") else None,
-            selected_sources=selected_sources,
-            year_range=year_range,
-            min_citations=min_citations
-        )
-    else:
-        st.warning("Please enter a search term.")
+        if query.strip():
+            combined_search(
+                clean_query(query),
+                api_key if config.get("enhanced_mode") else None,
+                selected_sources=selected_sources,
+                year_range=year_range,
+                min_citations=min_citations
+            )
+        else:
+            st.warning("Please enter a search term.")
 
 if __name__ == "__main__":
     main()
