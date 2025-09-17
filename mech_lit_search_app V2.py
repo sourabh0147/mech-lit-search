@@ -1,4 +1,4 @@
-# mech_lit_search_app_clean_v2.py
+# mech_lit_search_app_optimized.py
 import re
 import json
 import requests
@@ -18,7 +18,8 @@ ARXIV_URL = "http://export.arxiv.org/api/query"
 PUBMED_SEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
-MAX_RESULTS_PER_SOURCE = 300  # Configurable max per source
+MAX_RESULTS_PER_SOURCE = 300  # configurable
+THREADS = 5  # max threads for parallel fetching
 
 # ---------------------------
 # Utilities
@@ -54,7 +55,7 @@ def save_cache(query, df):
     safe_save_json(CACHE_PATH, cache)
 
 # ---------------------------
-# Search Functions
+# Search functions with pagination
 # ---------------------------
 def search_semantic_scholar(query, api_key=None):
     results, offset = [], 0
@@ -101,9 +102,7 @@ def search_crossref(query):
         params = {"query": query, "rows": min(100, MAX_RESULTS_PER_SOURCE - offset), "offset": offset}
         try:
             r = requests.get(CROSSREF_URL, params=params, timeout=30)
-            if r.status_code != 200:
-                st.warning(f"Crossref returned {r.status_code}")
-                break
+            if r.status_code != 200: break
             items = r.json()["message"]["items"]
             if not items: break
             for i in items:
@@ -175,7 +174,7 @@ def search_pubmed(query):
     while len(results) < MAX_RESULTS_PER_SOURCE:
         retmax = min(100, MAX_RESULTS_PER_SOURCE - len(results))
         try:
-            r = requests.get(PUBMED_SEARCH_URL, params={"db": "pubmed", "term": query, "retmax": retmax, "retstart": retstart, "retmode":"json"}, timeout=20)
+            r = requests.get(PUBMED_SEARCH_URL, params={"db":"pubmed","term":query,"retmax":retmax,"retstart":retstart,"retmode":"json"}, timeout=20)
             if r.status_code != 200: break
             ids = r.json().get("esearchresult", {}).get("idlist", [])
             if not ids: break
@@ -201,7 +200,7 @@ def search_pubmed(query):
     return pd.DataFrame(results[:MAX_RESULTS_PER_SOURCE])
 
 # ---------------------------
-# Combined Search with Filters
+# Combined search with incremental display
 # ---------------------------
 def combined_search(query, api_key=None, selected_sources=None, year_range=None, min_citations=None):
     cached = get_cached_results(query)
@@ -210,14 +209,27 @@ def combined_search(query, api_key=None, selected_sources=None, year_range=None,
         df = cached
     else:
         results_dfs = []
-        funcs = [search_semantic_scholar, search_crossref, search_doaj, search_arxiv, search_pubmed]
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(func, query): func.__name__ for func in funcs}
+        funcs_map = {
+            "Semantic Scholar": lambda q: search_semantic_scholar(q, api_key),
+            "Crossref": search_crossref,
+            "DOAJ": search_doaj,
+            "arXiv": search_arxiv,
+            "PubMed": search_pubmed
+        }
+        if selected_sources:
+            funcs_map = {k:v for k,v in funcs_map.items() if k in selected_sources}
+
+        # Threaded fetching with incremental display
+        with ThreadPoolExecutor(max_workers=THREADS) as executor:
+            futures = {executor.submit(func, query): name for name, func in funcs_map.items()}
             for future in as_completed(futures):
                 df_source = future.result()
                 if not df_source.empty:
                     results_dfs.append(df_source)
                     st.success(f"Fetched {len(df_source)} results from {futures[future]}")
+                    # incremental display
+                    display_results(df_source)
+
         df = pd.concat(results_dfs, ignore_index=True) if results_dfs else pd.DataFrame()
         if not df.empty:
             save_cache(query, df)
@@ -225,47 +237,45 @@ def combined_search(query, api_key=None, selected_sources=None, year_range=None,
             st.error("No results found from any source.")
             return pd.DataFrame()
 
-    # ---------------------------
-    # Safe filters
-    # ---------------------------
-    # Convert Year and Citations to numeric
+    # Safe numeric conversion
     df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
     df["Citations"] = pd.to_numeric(df["Citations"], errors="coerce")
 
-    # Apply source filter
-    if selected_sources:
-        df = df[df["Source"].isin(selected_sources)]
-
-    # Apply year filter
+    # Filters
     if year_range:
         df = df[df["Year"].between(year_range[0], year_range[1])]
-
-    # Apply citations filter
     if min_citations is not None:
         df = df[df["Citations"].fillna(0) >= min_citations]
 
     return df
 
 # ---------------------------
+# Display function
+# ---------------------------
+def display_results(df):
+    for _, row in df.iterrows():
+        st.markdown(f"""
+            <div style="background:white; padding:1em; margin-bottom:1em; border-radius:12px; box-shadow:0px 2px 8px rgba(0,0,0,0.1);">
+                <div style="font-weight:600; font-size:1.2em; margin-bottom:0.2em;">{row['Title']}</div>
+                <div style="color:#475569; font-size:0.9em;">
+                    <b>Source:</b> {row['Source']}<br>
+                    <b>Authors:</b> {row['Authors']}<br>
+                    <b>Year:</b> {row['Year']} | <b>Citations:</b> {row['Citations']}
+                </div>
+                <div style="margin-top:0.5em;">
+                    <a style="font-size:0.85em;background:#e2e8f0;border-radius:6px;padding:3px 8px;margin-right:6px;text-decoration:none;" href="{row['URL']}" target="_blank">View Paper</a>
+                    {"<a style='font-size:0.85em;background:#e2e8f0;border-radius:6px;padding:3px 8px;margin-right:6px;text-decoration:none;' href='https://doi.org/" + row['DOI'] + "' target='_blank'>DOI</a>" if row['DOI'] else ""}
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
+
+# ---------------------------
 # Streamlit UI
 # ---------------------------
 def main():
     st.set_page_config(page_title="Mechanical Engineering Literature Search", page_icon="🔎", layout="wide")
-    st.markdown("""
-    <style>
-    h1,h2,h3 { font-family: 'Segoe UI', sans-serif; }
-    .stButton button { background-color:#2563EB;color:white;border-radius:10px;padding:0.5em 1em;font-size:1.1em; }
-    .stButton button:hover { background-color:#1E40AF; }
-    .paper-card { background:white; padding:1em; margin-bottom:1em; border-radius:12px; box-shadow:0px 2px 8px rgba(0,0,0,0.1);}
-    .paper-title { font-weight:600; font-size:1.2em; margin-bottom:0.2em; }
-    .paper-meta { color:#475569; font-size:0.9em; }
-    .link-btn { font-size:0.85em; background-color:#e2e8f0; border-radius:6px; padding:3px 8px; margin-right:6px; text-decoration:none;}
-    .link-btn:hover { background-color:#cbd5e1; }
-    </style>
-    """, unsafe_allow_html=True)
-
     st.title("🔎 Mechanical Engineering Literature Search")
-    st.caption("Search Semantic Scholar, Crossref, DOAJ, arXiv, PubMed with filters.")
+    st.caption("Search across Semantic Scholar, Crossref, DOAJ, arXiv, PubMed with filters and incremental display.")
 
     config = safe_load_json(CONFIG_PATH)
     with st.expander("⚙️ Advanced Settings", expanded=False):
@@ -280,7 +290,6 @@ def main():
                 safe_save_json(CONFIG_PATH, config)
                 st.success("Credentials saved!")
 
-        # Filters
         all_sources = ["Semantic Scholar","Crossref","DOAJ","arXiv","PubMed"]
         selected_sources = st.multiselect("Select Sources", all_sources, default=all_sources)
         year_range = st.slider("Year Range", 1900, 2030, (2000, 2025))
@@ -290,32 +299,13 @@ def main():
     if st.button("🔍 Search"):
         if query.strip():
             with st.spinner("Fetching papers..."):
-                results = combined_search(
+                combined_search(
                     clean_query(query),
                     api_key if config.get("enhanced_mode") else None,
                     selected_sources=selected_sources,
                     year_range=year_range,
                     min_citations=min_citations
                 )
-            if results.empty:
-                st.error("No results found.")
-            else:
-                st.subheader(f"📚 Showing {len(results)} results")
-                for _, row in results.iterrows():
-                    st.markdown(f"""
-                        <div class="paper-card">
-                            <div class="paper-title">{row['Title']}</div>
-                            <div class="paper-meta">
-                                <b>Source:</b> {row['Source']}<br>
-                                <b>Authors:</b> {row['Authors']} <br>
-                                <b>Year:</b> {row['Year']} | <b>Citations:</b> {row['Citations']}
-                            </div>
-                            <div style="margin-top:0.5em;">
-                                <a class="link-btn" href="{row['URL']}" target="_blank">View Paper</a>
-                                {"<a class='link-btn' href='https://doi.org/" + row['DOI'] + "' target='_blank'>DOI</a>" if row['DOI'] else ""}
-                            </div>
-                        </div>
-                    """, unsafe_allow_html=True)
         else:
             st.warning("Please enter a search term.")
 
