@@ -1,4 +1,4 @@
-# mech_lit_search_app_optimized.py
+# mech_lit_search_app_final.py
 import re
 import json
 import requests
@@ -18,8 +18,8 @@ ARXIV_URL = "http://export.arxiv.org/api/query"
 PUBMED_SEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
-MAX_RESULTS_PER_SOURCE = 300  # configurable
-THREADS = 5  # max threads for parallel fetching
+MAX_RESULTS_PER_SOURCE = 300
+THREADS = 5
 
 # ---------------------------
 # Utilities
@@ -47,15 +47,18 @@ def clean_query(query: str) -> str:
 # ---------------------------
 def get_cached_results(query):
     cache = safe_load_json(CACHE_PATH)
-    return pd.DataFrame(cache.get(query, []))
+    df = pd.DataFrame(cache.get(query, []))
+    return df if not df.empty else None
 
 def save_cache(query, df):
+    if df.empty:
+        return
     cache = safe_load_json(CACHE_PATH)
     cache[query] = df.to_dict(orient="records")
     safe_save_json(CACHE_PATH, cache)
 
 # ---------------------------
-# Search functions with pagination
+# Search functions
 # ---------------------------
 def search_semantic_scholar(query, api_key=None):
     results, offset = [], 0
@@ -200,58 +203,7 @@ def search_pubmed(query):
     return pd.DataFrame(results[:MAX_RESULTS_PER_SOURCE])
 
 # ---------------------------
-# Combined search with incremental display
-# ---------------------------
-def combined_search(query, api_key=None, selected_sources=None, year_range=None, min_citations=None):
-            cached = get_cached_results(query)
-        if cached is not None and not cached.empty:
-            st.info(f"Showing cached results ({len(cached)} papers)")
-            display_results(cached)  # display cached results
-            df = cached
-    else:
-        results_dfs = []
-        funcs_map = {
-            "Semantic Scholar": lambda q: search_semantic_scholar(q, api_key),
-            "Crossref": search_crossref,
-            "DOAJ": search_doaj,
-            "arXiv": search_arxiv,
-            "PubMed": search_pubmed
-        }
-        if selected_sources:
-            funcs_map = {k:v for k,v in funcs_map.items() if k in selected_sources}
-
-        # Threaded fetching with incremental display
-        with ThreadPoolExecutor(max_workers=THREADS) as executor:
-            futures = {executor.submit(func, query): name for name, func in funcs_map.items()}
-            for future in as_completed(futures):
-                df_source = future.result()
-                if not df_source.empty:
-                    results_dfs.append(df_source)
-                    st.success(f"Fetched {len(df_source)} results from {futures[future]}")
-                    # incremental display
-                    display_results(df_source)
-
-        df = pd.concat(results_dfs, ignore_index=True) if results_dfs else pd.DataFrame()
-        if not df.empty:
-            save_cache(query, df)
-        else:
-            st.error("No results found from any source.")
-            return pd.DataFrame()
-
-    # Safe numeric conversion
-    df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
-    df["Citations"] = pd.to_numeric(df["Citations"], errors="coerce")
-
-    # Filters
-    if year_range:
-        df = df[df["Year"].between(year_range[0], year_range[1])]
-    if min_citations is not None:
-        df = df[df["Citations"].fillna(0) >= min_citations]
-
-    return df
-
-# ---------------------------
-# Display function
+# Incremental display
 # ---------------------------
 def display_results(df):
     for _, row in df.iterrows():
@@ -269,6 +221,53 @@ def display_results(df):
                 </div>
             </div>
         """, unsafe_allow_html=True)
+
+# ---------------------------
+# Combined search
+# ---------------------------
+def combined_search(query, api_key=None, selected_sources=None, year_range=None, min_citations=None):
+    cached = get_cached_results(query)
+    if cached is not None:
+        st.info(f"Showing cached results ({len(cached)} papers)")
+        display_results(cached)
+        return cached
+
+    results_dfs = []
+    funcs_map = {
+        "Semantic Scholar": lambda q: search_semantic_scholar(q, api_key),
+        "Crossref": search_crossref,
+        "DOAJ": search_doaj,
+        "arXiv": search_arxiv,
+        "PubMed": search_pubmed
+    }
+    if selected_sources:
+        funcs_map = {k:v for k,v in funcs_map.items() if k in selected_sources}
+
+    # Threaded fetching
+    with ThreadPoolExecutor(max_workers=THREADS) as executor:
+        futures = {executor.submit(func, query): name for name, func in funcs_map.items()}
+        for future in as_completed(futures):
+            df_source = future.result()
+            if not df_source.empty:
+                results_dfs.append(df_source)
+                st.success(f"Fetched {len(df_source)} results from {futures[future]}")
+                display_results(df_source)
+
+    df = pd.concat(results_dfs, ignore_index=True) if results_dfs else pd.DataFrame()
+    if df.empty:
+        st.error("No results found from any source.")
+        return df
+
+    df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+    df["Citations"] = pd.to_numeric(df["Citations"], errors="coerce")
+
+    if year_range:
+        df = df[df["Year"].between(year_range[0], year_range[1])]
+    if min_citations is not None:
+        df = df[df["Citations"].fillna(0) >= min_citations]
+
+    save_cache(query, df)
+    return df
 
 # ---------------------------
 # Streamlit UI
@@ -297,18 +296,16 @@ def main():
         min_citations = st.number_input("Minimum Citations (Semantic Scholar only)", min_value=0, value=0, step=1)
 
     query = st.text_input("Enter your search query", placeholder="e.g. tribology of magnesium alloys")
-    if st.button("🔍 Search"):
-        if query.strip():
-            with st.spinner("Fetching papers..."):
-                combined_search(
-                    clean_query(query),
-                    api_key if config.get("enhanced_mode") else None,
-                    selected_sources=selected_sources,
-                    year_range=year_range,
-                    min_citations=min_citations
-                )
-        else:
-            st.warning("Please enter a search term.")
+    if st.button("🔍 Search") and query.strip():
+        combined_search(
+            clean_query(query),
+            api_key if config.get("enhanced_mode") else None,
+            selected_sources=selected_sources,
+            year_range=year_range,
+            min_citations=min_citations
+        )
+    elif st.button("🔍 Search"):
+        st.warning("Please enter a search term.")
 
 if __name__ == "__main__":
     main()
