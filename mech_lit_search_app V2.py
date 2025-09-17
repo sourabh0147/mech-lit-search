@@ -1,4 +1,4 @@
-# mech_lit_search_app_optimized.py
+# mech_lit_search_app_clean.py
 import re
 import json
 import requests
@@ -18,10 +18,10 @@ ARXIV_URL = "http://export.arxiv.org/api/query"
 PUBMED_SEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
-MAX_RESULTS_PER_SOURCE = 300  # Configurable max results per source
+MAX_RESULTS_PER_SOURCE = 300  # Configurable max per source
 
 # ---------------------------
-# Utility Functions
+# Utilities
 # ---------------------------
 def safe_load_json(path: Path):
     if path.exists():
@@ -57,13 +57,11 @@ def save_cache(query, df):
 # Search Functions
 # ---------------------------
 def search_semantic_scholar(query, api_key=None):
-    results = []
-    limit = 100
-    offset = 0
+    results, offset = [], 0
     while offset < MAX_RESULTS_PER_SOURCE:
         params = {
             "query": query,
-            "limit": min(limit, MAX_RESULTS_PER_SOURCE - offset),
+            "limit": min(100, MAX_RESULTS_PER_SOURCE - offset),
             "offset": offset,
             "fields": "paperId,title,authors,year,citationCount,externalIds,url"
         }
@@ -74,8 +72,7 @@ def search_semantic_scholar(query, api_key=None):
             r = requests.get(SEMANTIC_SCHOLAR_URL, params=params, headers=headers, timeout=15)
             if r.status_code == 200:
                 data = r.json().get("data", [])
-                if not data:
-                    break
+                if not data: break
                 for p in data:
                     results.append({
                         "Source": "Semantic Scholar",
@@ -88,7 +85,7 @@ def search_semantic_scholar(query, api_key=None):
                     })
                 offset += len(data)
             elif r.status_code == 429:
-                st.warning("Semantic Scholar API rate limit reached. Partial results returned.")
+                st.warning("Semantic Scholar rate limit reached. Partial results returned.")
                 break
             else:
                 st.warning(f"Semantic Scholar returned {r.status_code}")
@@ -99,112 +96,91 @@ def search_semantic_scholar(query, api_key=None):
     return pd.DataFrame(results)
 
 def search_crossref(query):
-    results = []
-    offset = 0
-    rows_per_request = 100
+    results, offset = [], 0
     while offset < MAX_RESULTS_PER_SOURCE:
-        params = {"query": query, "rows": min(rows_per_request, MAX_RESULTS_PER_SOURCE - offset), "offset": offset}
+        params = {"query": query, "rows": min(100, MAX_RESULTS_PER_SOURCE - offset), "offset": offset}
         try:
             r = requests.get(CROSSREF_URL, params=params, timeout=30)
-            if r.status_code == 200:
-                items = r.json()["message"]["items"]
-                if not items:
-                    break
-                for i in items:
-                    results.append({
-                        "Source": "Crossref",
-                        "Title": i.get("title", [""])[0],
-                        "Authors": ", ".join([f"{a.get('given','')} {a.get('family','')}" for a in i.get("author", [])]) if "author" in i else "",
-                        "Year": i.get("issued", {}).get("date-parts", [[None]])[0][0],
-                        "Citations": None,
-                        "DOI": i.get("DOI"),
-                        "URL": i.get("URL")
-                    })
-                offset += len(items)
-            else:
+            if r.status_code != 200:
                 st.warning(f"Crossref returned {r.status_code}")
                 break
+            items = r.json()["message"]["items"]
+            if not items: break
+            for i in items:
+                results.append({
+                    "Source": "Crossref",
+                    "Title": i.get("title", [""])[0],
+                    "Authors": ", ".join([f"{a.get('given','')} {a.get('family','')}" for a in i.get("author", [])]) if "author" in i else "",
+                    "Year": i.get("issued", {}).get("date-parts", [[None]])[0][0],
+                    "Citations": None,
+                    "DOI": i.get("DOI"),
+                    "URL": i.get("URL")
+                })
+            offset += len(items)
         except Exception as e:
             st.warning(f"Crossref error: {e}")
             break
     return pd.DataFrame(results)
 
 def search_doaj(query):
-    results = []
-    page = 1
-    page_size = 100
+    results, page = [], 1
     while len(results) < MAX_RESULTS_PER_SOURCE:
-        params = {"q": query, "pageSize": page_size, "page": page}
+        params = {"q": query, "pageSize": 100, "page": page}
         try:
             r = requests.get(DOAJ_URL, params=params, timeout=20)
-            if r.status_code == 200:
-                items = r.json().get("results", [])
-                if not items:
-                    break
-                for i in items:
-                    bib = i.get("bibjson", {})
-                    results.append({
-                        "Source": "DOAJ",
-                        "Title": bib.get("title"),
-                        "Authors": ", ".join([a.get("name","") for a in bib.get("author", [])]),
-                        "Year": bib.get("year"),
-                        "Citations": None,
-                        "DOI": bib.get("identifier", [{}])[0].get("id") if bib.get("identifier") else None,
-                        "URL": bib.get("link", [{}])[0].get("url") if bib.get("link") else None
-                    })
-                page += 1
-            else:
-                st.warning(f"DOAJ returned {r.status_code}")
-                break
+            if r.status_code != 200: break
+            items = r.json().get("results", [])
+            if not items: break
+            for i in items:
+                bib = i.get("bibjson", {})
+                results.append({
+                    "Source": "DOAJ",
+                    "Title": bib.get("title"),
+                    "Authors": ", ".join([a.get("name","") for a in bib.get("author", [])]),
+                    "Year": bib.get("year"),
+                    "Citations": None,
+                    "DOI": bib.get("identifier", [{}])[0].get("id") if bib.get("identifier") else None,
+                    "URL": bib.get("link", [{}])[0].get("url") if bib.get("link") else None
+                })
+            page += 1
         except Exception as e:
             st.warning(f"DOAJ error: {e}")
             break
     return pd.DataFrame(results[:MAX_RESULTS_PER_SOURCE])
 
 def search_arxiv(query):
-    results = []
-    batch_size = 100
-    start = 0
+    results, start = [], 0
     while len(results) < MAX_RESULTS_PER_SOURCE:
-        params = {"search_query": f"all:{query}", "start": start, "max_results": batch_size}
+        params = {"search_query": f"all:{query}", "start": start, "max_results": 100}
         try:
             r = requests.get(ARXIV_URL, params=params, timeout=20)
-            if r.status_code != 200:
-                st.warning(f"arXiv returned {r.status_code}")
-                break
+            if r.status_code != 200: break
             root = ET.fromstring(r.text)
             entries = root.findall("{http://www.w3.org/2005/Atom}entry")
-            if not entries:
-                break
+            if not entries: break
             for e in entries:
                 title = e.find("{http://www.w3.org/2005/Atom}title").text
                 authors = ", ".join([a.find("{http://www.w3.org/2005/Atom}name").text for a in e.findall("{http://www.w3.org/2005/Atom}author")])
                 url = e.find("{http://www.w3.org/2005/Atom}id").text
                 year = e.find("{http://www.w3.org/2005/Atom}published").text[:4]
                 results.append({"Source": "arXiv", "Title": title, "Authors": authors, "Year": year, "Citations": None, "DOI": None, "URL": url})
-            start += batch_size
+            start += 100
         except Exception as e:
             st.warning(f"arXiv error: {e}")
             break
     return pd.DataFrame(results[:MAX_RESULTS_PER_SOURCE])
 
 def search_pubmed(query):
-    results = []
-    retmax = 100
-    retstart = 0
+    results, retstart = [], 0
     while len(results) < MAX_RESULTS_PER_SOURCE:
+        retmax = min(100, MAX_RESULTS_PER_SOURCE - len(results))
         try:
-            params_search = {"db": "pubmed", "term": query, "retmax": min(retmax, MAX_RESULTS_PER_SOURCE - len(results)), "retstart": retstart, "retmode": "json"}
-            r = requests.get(PUBMED_SEARCH_URL, params=params_search, timeout=20)
-            if r.status_code != 200:
-                st.warning(f"PubMed search returned {r.status_code}")
-                break
+            r = requests.get(PUBMED_SEARCH_URL, params={"db": "pubmed", "term": query, "retmax": retmax, "retstart": retstart, "retmode":"json"}, timeout=20)
+            if r.status_code != 200: break
             ids = r.json().get("esearchresult", {}).get("idlist", [])
-            if not ids:
-                break
-            params_summary = {"db": "pubmed", "id": ",".join(ids), "retmode": "json"}
-            r_summary = requests.get(PUBMED_SUMMARY_URL, params=params_summary, timeout=20)
-            data = r_summary.json().get("result", {})
+            if not ids: break
+            r_sum = requests.get(PUBMED_SUMMARY_URL, params={"db":"pubmed","id":",".join(ids),"retmode":"json"}, timeout=20)
+            data = r_sum.json().get("result", {})
             for pid in ids:
                 item = data.get(pid)
                 if item:
@@ -213,7 +189,7 @@ def search_pubmed(query):
                         "Source": "PubMed",
                         "Title": item.get("title"),
                         "Authors": authors,
-                        "Year": item.get("pubdate", "")[:4],
+                        "Year": item.get("pubdate","")[:4],
                         "Citations": None,
                         "DOI": item.get("elocationid"),
                         "URL": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/"
@@ -225,46 +201,44 @@ def search_pubmed(query):
     return pd.DataFrame(results[:MAX_RESULTS_PER_SOURCE])
 
 # ---------------------------
-# Combined Search with ThreadPoolExecutor
+# Combined Search with Filters
 # ---------------------------
-def combined_search(query, api_key=None):
+def combined_search(query, api_key=None, selected_sources=None, year_range=None, min_citations=None):
     cached = get_cached_results(query)
     if not cached.empty:
         st.info("Showing cached results")
-        return cached
-
-    results_dfs = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {
-            executor.submit(func, query): name
-            for func, name in [
-                (search_semantic_scholar, "Semantic Scholar"),
-                (search_crossref, "Crossref"),
-                (search_doaj, "DOAJ"),
-                (search_arxiv, "arXiv"),
-                (search_pubmed, "PubMed")
-            ]
-        }
-        for future in as_completed(futures):
-            df = future.result()
-            if not df.empty:
-                results_dfs.append(df)
-                st.success(f"Fetched {len(df)} results from {futures[future]}")
-                st.dataframe(df[["Source","Title","Authors","Year"]].head(5))  # Incremental display
-
-    combined = pd.concat(results_dfs, ignore_index=True) if results_dfs else pd.DataFrame()
-    if not combined.empty:
-        save_cache(query, combined)
+        df = cached
     else:
-        st.error("No results found from any source. Please try again later.")
-    return combined
+        results_dfs = []
+        funcs = [search_semantic_scholar, search_crossref, search_doaj, search_arxiv, search_pubmed]
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(func, query): func.__name__ for func in funcs}
+            for future in as_completed(futures):
+                df_source = future.result()
+                if not df_source.empty:
+                    results_dfs.append(df_source)
+                    st.success(f"Fetched {len(df_source)} results from {futures[future]}")
+        df = pd.concat(results_dfs, ignore_index=True) if results_dfs else pd.DataFrame()
+        if not df.empty:
+            save_cache(query, df)
+        else:
+            st.error("No results found from any source.")
+            return pd.DataFrame()
+
+    # Apply filters
+    if selected_sources:
+        df = df[df["Source"].isin(selected_sources)]
+    if year_range:
+        df = df[df["Year"].apply(lambda x: x is not None and year_range[0] <= int(x) <= year_range[1])]
+    if min_citations is not None:
+        df = df[df["Citations"].apply(lambda x: x is not None and x >= min_citations)]
+    return df
 
 # ---------------------------
 # Streamlit UI
 # ---------------------------
 def main():
     st.set_page_config(page_title="Mechanical Engineering Literature Search", page_icon="🔎", layout="wide")
-
     st.markdown("""
     <style>
     h1,h2,h3 { font-family: 'Segoe UI', sans-serif; }
@@ -279,7 +253,7 @@ def main():
     """, unsafe_allow_html=True)
 
     st.title("🔎 Mechanical Engineering Literature Search")
-    st.caption("Search multiple sources including Semantic Scholar, Crossref, DOAJ, arXiv, and PubMed.")
+    st.caption("Search Semantic Scholar, Crossref, DOAJ, arXiv, PubMed with filters.")
 
     config = safe_load_json(CONFIG_PATH)
     with st.expander("⚙️ Advanced Settings", expanded=False):
@@ -294,32 +268,44 @@ def main():
                 safe_save_json(CONFIG_PATH, config)
                 st.success("Credentials saved!")
 
-    query = st.text_input("Enter your search query", placeholder="e.g. tribology of magnesium alloys")
-    if st.button("🔍 Search"):
-        if query.strip():
-            with st.spinner("Fetching papers from all sources..."):
-                results = combined_search(clean_query(query), api_key if config.get("enhanced_mode") else None)
+        # Filters
+        all_sources = ["Semantic Scholar","Crossref","DOAJ","arXiv","PubMed"]
+        selected_sources = st.multiselect("Select sources", options=all_sources, default=all_sources)
+        year_min, year_max = st.slider("Year range", 1900, 2025, (2000, 2025))
+        min_citations = st.number_input("Minimum citations (Semantic Scholar only)", min_value=0, value=0)
 
-            if not results.empty:
-                st.subheader(f"📚 Total {len(results)} results")
-                for _, row in results.iterrows():
-                    with st.container():
-                        st.markdown(f"""
-                        <div class="paper-card">
-                            <div class="paper-title">{row['Title']}</div>
-                            <div class="paper-meta">
-                                <b>Source:</b> {row['Source']}<br>
-                                <b>Authors:</b> {row['Authors']} <br>
-                                <b>Year:</b> {row['Year']} | <b>Citations:</b> {row['Citations'] if row['Citations'] else 'N/A'}
-                            </div>
-                            <div style="margin-top:0.5em;">
-                                <a class="link-btn" href="{row['URL']}" target="_blank">View Paper</a>
-                                {"<a class='link-btn' href='https://doi.org/" + row['DOI'] + "' target='_blank'>DOI</a>" if row['DOI'] else ""}
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+    query = st.text_input("Enter your search query", placeholder="e.g. tribology of magnesium alloys")
+
+    if st.button("🔍 Search") and query.strip():
+        with st.spinner("Fetching papers from all sources..."):
+            results = combined_search(
+                clean_query(query),
+                api_key if config.get("enhanced_mode") else None,
+                selected_sources=selected_sources,
+                year_range=(year_min, year_max),
+                min_citations=min_citations
+            )
+
+        if not results.empty:
+            st.subheader(f"📚 Total {len(results)} results after filters")
+            for _, row in results.iterrows():
+                st.markdown(f"""
+                <div class="paper-card">
+                    <div class="paper-title">{row['Title']}</div>
+                    <div class="paper-meta">
+                        <b>Source:</b> {row['Source']}<br>
+                        <b>Authors:</b> {row['Authors']}<br>
+                        <b>Year:</b> {row['Year']} | <b>Citations:</b> {row['Citations'] if row['Citations'] else 'N/A'}
+                    </div>
+                    <a class="link-btn" href="{row['URL']}" target="_blank">View Paper</a>
+                    {"<a class='link-btn' href='https://doi.org/" + row['DOI'] + "' target='_blank'>DOI</a>" if row['DOI'] else ""}
+                </div>
+                """, unsafe_allow_html=True)
         else:
-            st.warning("Please enter a search term.")
+            st.warning("No results match the filters.")
+
+    elif not query.strip():
+        st.warning("Please enter a search term.")
 
 if __name__ == "__main__":
     main()
