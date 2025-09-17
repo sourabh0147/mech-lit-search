@@ -1,12 +1,12 @@
-# mech_lit_search_app_clean.py
+# mech_lit_search_app_optimized.py
 import re
 import json
 import requests
 import pandas as pd
 import streamlit as st
 from pathlib import Path
-import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import xml.etree.ElementTree as ET
 
 CONFIG_PATH = Path("config.json")
 CACHE_PATH = Path("cache.json")
@@ -18,12 +18,12 @@ ARXIV_URL = "http://export.arxiv.org/api/query"
 PUBMED_SEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 PUBMED_SUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
-MAX_RESULTS_PER_SOURCE = 300
+# --------------------------- Configurable parameters ---------------------------
+MAX_RESULTS_PER_SOURCE = 50   # reduce for speed, can be 300 for full
 THREADS = 5
+REQUEST_TIMEOUT = 15          # seconds
 
-# ---------------------------
-# Utilities
-# ---------------------------
+# --------------------------- Utilities ---------------------------
 def safe_load_json(path: Path):
     if path.exists():
         try:
@@ -42,9 +42,6 @@ def clean_query(query: str) -> str:
     query = re.sub(r"[^\w\s\-+\"']", " ", query)
     return " ".join(query.split())
 
-# ---------------------------
-# Caching
-# ---------------------------
 def get_cached_results(query):
     cache = safe_load_json(CACHE_PATH)
     df = pd.DataFrame(cache.get(query, []))
@@ -57,57 +54,40 @@ def save_cache(query, df):
     cache[query] = df.to_dict(orient="records")
     safe_save_json(CACHE_PATH, cache)
 
-# ---------------------------
-# Search functions
-# ---------------------------
+# --------------------------- Search functions ---------------------------
 def search_semantic_scholar(query, api_key=None):
-    results, offset = [], 0
-    while offset < MAX_RESULTS_PER_SOURCE:
-        params = {
-            "query": query,
-            "limit": min(100, MAX_RESULTS_PER_SOURCE - offset),
-            "offset": offset,
-            "fields": "paperId,title,authors,year,citationCount,externalIds,url"
-        }
-        headers = {"User-Agent": "MechEngSearch/2.0"}
-        if api_key:
-            headers["x-api-key"] = api_key
-        try:
-            r = requests.get(SEMANTIC_SCHOLAR_URL, params=params, headers=headers, timeout=15)
-            if r.status_code == 200:
-                data = r.json().get("data", [])
-                if not data: break
-                for p in data:
-                    results.append({
-                        "Source": "Semantic Scholar",
-                        "Title": p.get("title"),
-                        "Authors": ", ".join([a["name"] for a in p.get("authors", [])]),
-                        "Year": p.get("year"),
-                        "Citations": p.get("citationCount"),
-                        "DOI": (p.get("externalIds") or {}).get("DOI"),
-                        "URL": p.get("url")
-                    })
-                offset += len(data)
-            elif r.status_code == 429:
-                st.warning("Semantic Scholar rate limit reached. Partial results returned.")
-                break
-            else:
-                st.warning(f"Semantic Scholar returned {r.status_code}")
-                break
-        except Exception as e:
-            st.warning(f"Semantic Scholar error: {e}")
-            break
+    results = []
+    params = {"query": query, "limit": MAX_RESULTS_PER_SOURCE, "fields": "paperId,title,authors,year,citationCount,externalIds,url"}
+    headers = {"User-Agent": "MechEngSearch/2.0"}
+    if api_key:
+        headers["x-api-key"] = api_key
+    try:
+        r = requests.get(SEMANTIC_SCHOLAR_URL, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
+            data = r.json().get("data", [])
+            for p in data:
+                results.append({
+                    "Source": "Semantic Scholar",
+                    "Title": p.get("title"),
+                    "Authors": ", ".join([a["name"] for a in p.get("authors", [])]),
+                    "Year": p.get("year"),
+                    "Citations": p.get("citationCount"),
+                    "DOI": (p.get("externalIds") or {}).get("DOI"),
+                    "URL": p.get("url")
+                })
+        elif r.status_code == 429:
+            st.warning("Semantic Scholar rate limit reached. Partial results returned.")
+    except Exception as e:
+        st.warning(f"Semantic Scholar error: {e}")
     return pd.DataFrame(results)
 
 def search_crossref(query):
-    results, offset = [], 0
-    while offset < MAX_RESULTS_PER_SOURCE:
-        params = {"query": query, "rows": min(100, MAX_RESULTS_PER_SOURCE - offset), "offset": offset}
-        try:
-            r = requests.get(CROSSREF_URL, params=params, timeout=30)
-            if r.status_code != 200: break
+    results = []
+    params = {"query": query, "rows": MAX_RESULTS_PER_SOURCE}
+    try:
+        r = requests.get(CROSSREF_URL, params=params, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
             items = r.json()["message"]["items"]
-            if not items: break
             for i in items:
                 results.append({
                     "Source": "Crossref",
@@ -118,21 +98,17 @@ def search_crossref(query):
                     "DOI": i.get("DOI"),
                     "URL": i.get("URL")
                 })
-            offset += len(items)
-        except Exception as e:
-            st.warning(f"Crossref error: {e}")
-            break
+    except Exception as e:
+        st.warning(f"Crossref error: {e}")
     return pd.DataFrame(results)
 
 def search_doaj(query):
-    results, page = [], 1
-    while len(results) < MAX_RESULTS_PER_SOURCE:
-        params = {"q": query, "pageSize": 100, "page": page}
-        try:
-            r = requests.get(DOAJ_URL, params=params, timeout=20)
-            if r.status_code != 200: break
+    results = []
+    params = {"q": query, "pageSize": MAX_RESULTS_PER_SOURCE, "page":1}
+    try:
+        r = requests.get(DOAJ_URL, params=params, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
             items = r.json().get("results", [])
-            if not items: break
             for i in items:
                 bib = i.get("bibjson", {})
                 results.append({
@@ -144,67 +120,55 @@ def search_doaj(query):
                     "DOI": bib.get("identifier", [{}])[0].get("id") if bib.get("identifier") else None,
                     "URL": bib.get("link", [{}])[0].get("url") if bib.get("link") else None
                 })
-            page += 1
-        except Exception as e:
-            st.warning(f"DOAJ error: {e}")
-            break
-    return pd.DataFrame(results[:MAX_RESULTS_PER_SOURCE])
+    except Exception as e:
+        st.warning(f"DOAJ error: {e}")
+    return pd.DataFrame(results)
 
 def search_arxiv(query):
-    results, start = [], 0
-    while len(results) < MAX_RESULTS_PER_SOURCE:
-        params = {"search_query": f"all:{query}", "start": start, "max_results": 100}
-        try:
-            r = requests.get(ARXIV_URL, params=params, timeout=20)
-            if r.status_code != 200: break
+    results = []
+    params = {"search_query": f"all:{query}", "start":0, "max_results":MAX_RESULTS_PER_SOURCE}
+    try:
+        r = requests.get(ARXIV_URL, params=params, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
             root = ET.fromstring(r.text)
             entries = root.findall("{http://www.w3.org/2005/Atom}entry")
-            if not entries: break
             for e in entries:
                 title = e.find("{http://www.w3.org/2005/Atom}title").text
                 authors = ", ".join([a.find("{http://www.w3.org/2005/Atom}name").text for a in e.findall("{http://www.w3.org/2005/Atom}author")])
                 url = e.find("{http://www.w3.org/2005/Atom}id").text
                 year = e.find("{http://www.w3.org/2005/Atom}published").text[:4]
-                results.append({"Source": "arXiv", "Title": title, "Authors": authors, "Year": year, "Citations": None, "DOI": None, "URL": url})
-            start += 100
-        except Exception as e:
-            st.warning(f"arXiv error: {e}")
-            break
-    return pd.DataFrame(results[:MAX_RESULTS_PER_SOURCE])
+                results.append({"Source":"arXiv","Title":title,"Authors":authors,"Year":year,"Citations":None,"DOI":None,"URL":url})
+    except Exception as e:
+        st.warning(f"arXiv error: {e}")
+    return pd.DataFrame(results)
 
 def search_pubmed(query):
-    results, retstart = [], 0
-    while len(results) < MAX_RESULTS_PER_SOURCE:
-        retmax = min(100, MAX_RESULTS_PER_SOURCE - len(results))
-        try:
-            r = requests.get(PUBMED_SEARCH_URL, params={"db":"pubmed","term":query,"retmax":retmax,"retstart":retstart,"retmode":"json"}, timeout=20)
-            if r.status_code != 200: break
+    results = []
+    try:
+        r = requests.get(PUBMED_SEARCH_URL, params={"db":"pubmed","term":query,"retmax":MAX_RESULTS_PER_SOURCE,"retmode":"json"}, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
             ids = r.json().get("esearchresult", {}).get("idlist", [])
-            if not ids: break
-            r_sum = requests.get(PUBMED_SUMMARY_URL, params={"db":"pubmed","id":",".join(ids),"retmode":"json"}, timeout=20)
-            data = r_sum.json().get("result", {})
-            for pid in ids:
-                item = data.get(pid)
-                if item:
-                    authors = ", ".join([a["name"] for a in item.get("authors", [])])
-                    results.append({
-                        "Source": "PubMed",
-                        "Title": item.get("title"),
-                        "Authors": authors,
-                        "Year": item.get("pubdate","")[:4],
-                        "Citations": None,
-                        "DOI": item.get("elocationid"),
-                        "URL": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/"
-                    })
-            retstart += retmax
-        except Exception as e:
-            st.warning(f"PubMed error: {e}")
-            break
-    return pd.DataFrame(results[:MAX_RESULTS_PER_SOURCE])
+            if ids:
+                r_sum = requests.get(PUBMED_SUMMARY_URL, params={"db":"pubmed","id":",".join(ids),"retmode":"json"}, timeout=REQUEST_TIMEOUT)
+                data = r_sum.json().get("result", {})
+                for pid in ids:
+                    item = data.get(pid)
+                    if item:
+                        authors = ", ".join([a["name"] for a in item.get("authors", [])])
+                        results.append({
+                            "Source":"PubMed",
+                            "Title":item.get("title"),
+                            "Authors":authors,
+                            "Year":item.get("pubdate","")[:4],
+                            "Citations":None,
+                            "DOI":item.get("elocationid"),
+                            "URL":f"https://pubmed.ncbi.nlm.nih.gov/{pid}/"
+                        })
+    except Exception as e:
+        st.warning(f"PubMed error: {e}")
+    return pd.DataFrame(results)
 
-# ---------------------------
-# Display results cleanly
-# ---------------------------
+# --------------------------- Display ---------------------------
 def display_results(df):
     for _, row in df.iterrows():
         doi_link = f'<a style="font-size:0.85em;background:#e2e8f0;border-radius:6px;padding:3px 8px;margin-right:6px;text-decoration:none;" href="https://doi.org/{row["DOI"]}" target="_blank">DOI</a>' if row["DOI"] else ""
@@ -223,14 +187,12 @@ def display_results(df):
         </div>
         ''', unsafe_allow_html=True)
 
-# ---------------------------
-# Combined multi-source search
-# ---------------------------
+# --------------------------- Combined search ---------------------------
 def combined_search(query, api_key=None, selected_sources=None):
     if selected_sources is None:
         selected_sources = ["Semantic Scholar","Crossref","DOAJ","arXiv","PubMed"]
-
     results = []
+    placeholders = {}
     with ThreadPoolExecutor(max_workers=THREADS) as executor:
         future_to_source = {}
         if "Semantic Scholar" in selected_sources:
@@ -245,19 +207,21 @@ def combined_search(query, api_key=None, selected_sources=None):
             future_to_source[executor.submit(search_pubmed, query)] = "PubMed"
 
         for future in as_completed(future_to_source):
-            df = future.result()
-            if not df.empty:
-                results.append(df)
+            src = future_to_source[future]
+            try:
+                df = future.result(timeout=REQUEST_TIMEOUT)
+                if not df.empty:
+                    results.append(df)
+                    st.info(f"{src} returned {len(df)} results")
+            except Exception as e:
+                st.warning(f"{src} failed: {e}")
 
     if results:
-        combined_df = pd.concat(results, ignore_index=True)
-        return combined_df
+        return pd.concat(results, ignore_index=True)
     else:
         return pd.DataFrame()
 
-# ---------------------------
-# Streamlit UI
-# ---------------------------
+# --------------------------- Streamlit UI ---------------------------
 def main():
     st.set_page_config(page_title="Mechanical Engineering Literature Search", page_icon="🔎", layout="wide")
     st.title("🔎 Mechanical Engineering Literature Search")
@@ -292,17 +256,11 @@ def main():
                 display_results(cached)
             else:
                 with st.spinner("Fetching papers..."):
-                    results = combined_search(
-                        clean_query(query),
-                        api_key if enhanced_mode else None,
-                        selected_sources=selected_sources
-                    )
+                    results = combined_search(clean_query(query), api_key if enhanced_mode else None, selected_sources)
                     if not results.empty:
-                        # Apply filters
                         results = results[results["Year"].apply(lambda x: x is not None and year_range[0] <= int(x) <= year_range[1])]
                         if min_citations > 0:
                             results = results[results["Citations"].fillna(0).astype(int) >= min_citations]
-
                         display_results(results)
                         save_cache(query, results)
                     else:
