@@ -296,7 +296,8 @@ def main():
         min_citations = st.number_input("Minimum Citations (Semantic Scholar only)", min_value=0, value=0, step=1)
 
     query = st.text_input("Enter your search query", placeholder="e.g. tribology of magnesium alloys")
-    if st.button("🔍 Search") and query.strip():
+    if st.button("🔍 Search"):
+    if query.strip():
         combined_search(
             clean_query(query),
             api_key if config.get("enhanced_mode") else None,
@@ -304,7 +305,7 @@ def main():
             year_range=year_range,
             min_citations=min_citations
         )
-    elif st.button("🔍 Search"):
+    else:
         st.warning("Please enter a search term.")
 
 if __name__ == "__main__":
