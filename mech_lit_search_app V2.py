@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import streamlit as st
 from pathlib import Path
+import time
 
 CONFIG_PATH = Path("config.json")
 SEMANTIC_SCHOLAR_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -69,48 +70,56 @@ def search_semantic_scholar(query, api_key=None):
             st.warning("Semantic Scholar API rate limit reached. Showing Crossref results only.")
             return pd.DataFrame()
         else:
-            st.warning(f"Semantic Scholar returned {r.status_code}")
+            st.warning(f"Semantic Scholar returned {r.status_code}. Showing Crossref results only.")
             return pd.DataFrame()
     except Exception as e:
-        st.warning(f"Semantic Scholar error: {e}")
+        st.warning(f"Semantic Scholar error: {e}. Showing Crossref results only.")
         return pd.DataFrame()
 
 # ---------------------------
-# Crossref Search
+# Crossref Search with retry
 # ---------------------------
-def search_crossref(query):
+def search_crossref(query, retries=2):
     params = {"query": query, "rows": 10}
-    try:
-        r = requests.get(CROSSREF_URL, params=params, timeout=10)
-        if r.status_code == 200:
-            items = r.json()["message"]["items"]
-            return pd.DataFrame([
-                {
-                    "Source": "Crossref",
-                    "Title": i.get("title", [""])[0],
-                    "Authors": ", ".join([f"{a.get('given','')} {a.get('family','')}" for a in i.get("author", [])]) if "author" in i else "",
-                    "Year": i.get("issued", {}).get("date-parts", [[None]])[0][0],
-                    "Citations": None,
-                    "DOI": i.get("DOI"),
-                    "URL": i.get("URL")
-                }
-                for i in items
-            ])
-        else:
-            st.warning(f"Crossref returned {r.status_code}")
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(CROSSREF_URL, params=params, timeout=30)
+            if r.status_code == 200:
+                items = r.json()["message"]["items"]
+                return pd.DataFrame([
+                    {
+                        "Source": "Crossref",
+                        "Title": i.get("title", [""])[0],
+                        "Authors": ", ".join([f"{a.get('given','')} {a.get('family','')}" for a in i.get("author", [])]) if "author" in i else "",
+                        "Year": i.get("issued", {}).get("date-parts", [[None]])[0][0],
+                        "Citations": None,
+                        "DOI": i.get("DOI"),
+                        "URL": i.get("URL")
+                    }
+                    for i in items
+                ])
+            else:
+                st.warning(f"Crossref returned {r.status_code}")
+                return pd.DataFrame()
+        except requests.exceptions.ReadTimeout:
+            if attempt < retries:
+                time.sleep(2)  # wait 2 seconds before retry
+            else:
+                st.warning("Crossref API read timeout. Please try again later.")
+                return pd.DataFrame()
+        except Exception as e:
+            st.warning(f"Crossref error: {e}")
             return pd.DataFrame()
-    except Exception as e:
-        st.warning(f"Crossref error: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 # ---------------------------
 # Combined Search
 # ---------------------------
 def combined_search(query, api_key=None):
     df_ss = search_semantic_scholar(query, api_key)
-    if df_ss.empty:
-        st.info("Semantic Scholar results unavailable, showing Crossref only.")
     df_cr = search_crossref(query)
+    if df_ss.empty and df_cr.empty:
+        st.error("No results available from Semantic Scholar or Crossref at this moment. Please try again later.")
     combined = pd.concat([df_ss, df_cr], ignore_index=True)
     return combined
 
@@ -188,9 +197,7 @@ def main():
             with st.spinner("Fetching papers..."):
                 results = combined_search(clean_query(query), api_key if config.get("enhanced_mode") else None)
 
-            if results.empty:
-                st.error("No results found.")
-            else:
+            if not results.empty:
                 st.subheader(f"📚 Showing {len(results)} results")
                 for _, row in results.iterrows():
                     with st.container():
