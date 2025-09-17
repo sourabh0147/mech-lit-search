@@ -8,6 +8,7 @@ from pathlib import Path
 
 CONFIG_PATH = Path("config.json")
 SEMANTIC_SCHOLAR_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+CROSSREF_URL = "https://api.crossref.org/works"
 
 # ---------------------------
 # Utility Functions
@@ -35,24 +36,24 @@ def top_n_terms(query: str, n=3):
     return " ".join(words[:n]) if words else query
 
 # ---------------------------
-# Search Function
+# Semantic Scholar Search
 # ---------------------------
 def search_semantic_scholar(query, api_key=None):
     params = {
         "query": query,
-        "limit": 20,
+        "limit": 10,
         "fields": "paperId,title,authors,year,citationCount,externalIds,url"
     }
     headers = {"User-Agent": "MechEngSearch/2.0"}
     if api_key:
         headers["x-api-key"] = api_key
-
     try:
         r = requests.get(SEMANTIC_SCHOLAR_URL, params=params, headers=headers, timeout=10)
         if r.status_code == 200:
             data = r.json().get("data", [])
             return pd.DataFrame([
                 {
+                    "Source": "Semantic Scholar",
                     "Title": p.get("title"),
                     "Authors": ", ".join([a["name"] for a in p.get("authors", [])]),
                     "Year": p.get("year"),
@@ -67,12 +68,47 @@ def search_semantic_scholar(query, api_key=None):
         else:
             st.warning(f"Semantic Scholar returned {r.status_code}")
             return pd.DataFrame()
-    except requests.RequestException as e:
-        st.error(f"Error contacting Semantic Scholar: {e}")
+    except Exception as e:
+        st.warning(f"Semantic Scholar error: {e}")
         return pd.DataFrame()
 
 # ---------------------------
-# Modern UI with Streamlit
+# Crossref Search
+# ---------------------------
+def search_crossref(query):
+    params = {"query": query, "rows": 10}
+    try:
+        r = requests.get(CROSSREF_URL, params=params, timeout=10)
+        if r.status_code == 200:
+            items = r.json()["message"]["items"]
+            return pd.DataFrame([
+                {
+                    "Source": "Crossref",
+                    "Title": i.get("title", [""])[0],
+                    "Authors": ", ".join([f"{a.get('given','')} {a.get('family','')}" for a in i.get("author", [])]) if "author" in i else "",
+                    "Year": i.get("issued", {}).get("date-parts", [[None]])[0][0],
+                    "Citations": None,
+                    "DOI": i.get("DOI"),
+                    "URL": i.get("URL")
+                }
+                for i in items
+            ])
+        return pd.DataFrame()
+    except Exception as e:
+        st.warning(f"Crossref error: {e}")
+        return pd.DataFrame()
+
+# ---------------------------
+# Combined Search
+# ---------------------------
+def combined_search(query, api_key=None):
+    df1 = search_semantic_scholar(query, api_key)
+    df2 = search_crossref(query)
+    combined = pd.concat([df1, df2], ignore_index=True)
+    return combined
+
+# ---------------------------
+# Streamlit UI
 # ---------------------------
 def main():
     st.set_page_config(page_title="Mechanical Engineering Literature Search", page_icon="🔎", layout="wide")
@@ -143,7 +179,7 @@ def main():
     if st.button("🔍 Search"):
         if query.strip():
             with st.spinner("Fetching papers..."):
-                results = search_semantic_scholar(clean_query(query), api_key if config.get("enhanced_mode") else None)
+                results = combined_search(clean_query(query), api_key if config.get("enhanced_mode") else None)
 
             if results.empty:
                 st.error("No results found.")
@@ -155,8 +191,9 @@ def main():
                         <div class="paper-card">
                             <div class="paper-title">{row['Title']}</div>
                             <div class="paper-meta">
+                                <b>Source:</b> {row['Source']}<br>
                                 <b>Authors:</b> {row['Authors']} <br>
-                                <b>Year:</b> {row['Year']} | <b>Citations:</b> {row['Citations']}
+                                <b>Year:</b> {row['Year']} | <b>Citations:</b> {row['Citations'] if row['Citations'] is not None else 'N/A'}
                             </div>
                             <div style="margin-top: 0.5em;">
                                 <a class="link-btn" href="{row['URL']}" target="_blank">View Paper</a>
