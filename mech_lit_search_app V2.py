@@ -1,4 +1,4 @@
-# mech_lit_search_app_clean.py
+# mech_lit_search_app_clean_v2.py
 import re
 import json
 import requests
@@ -225,13 +225,25 @@ def combined_search(query, api_key=None, selected_sources=None, year_range=None,
             st.error("No results found from any source.")
             return pd.DataFrame()
 
-    # Apply filters
+    # ---------------------------
+    # Safe filters
+    # ---------------------------
+    # Convert Year and Citations to numeric
+    df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+    df["Citations"] = pd.to_numeric(df["Citations"], errors="coerce")
+
+    # Apply source filter
     if selected_sources:
         df = df[df["Source"].isin(selected_sources)]
+
+    # Apply year filter
     if year_range:
-        df = df[df["Year"].apply(lambda x: x is not None and year_range[0] <= int(x) <= year_range[1])]
+        df = df[df["Year"].between(year_range[0], year_range[1])]
+
+    # Apply citations filter
     if min_citations is not None:
-        df = df[df["Citations"].apply(lambda x: x is not None and x >= min_citations)]
+        df = df[df["Citations"].fillna(0) >= min_citations]
+
     return df
 
 # ---------------------------
@@ -270,42 +282,42 @@ def main():
 
         # Filters
         all_sources = ["Semantic Scholar","Crossref","DOAJ","arXiv","PubMed"]
-        selected_sources = st.multiselect("Select sources", options=all_sources, default=all_sources)
-        year_min, year_max = st.slider("Year range", 1900, 2025, (2000, 2025))
-        min_citations = st.number_input("Minimum citations (Semantic Scholar only)", min_value=0, value=0)
+        selected_sources = st.multiselect("Select Sources", all_sources, default=all_sources)
+        year_range = st.slider("Year Range", 1900, 2030, (2000, 2025))
+        min_citations = st.number_input("Minimum Citations (Semantic Scholar only)", min_value=0, value=0, step=1)
 
     query = st.text_input("Enter your search query", placeholder="e.g. tribology of magnesium alloys")
-
-    if st.button("🔍 Search") and query.strip():
-        with st.spinner("Fetching papers from all sources..."):
-            results = combined_search(
-                clean_query(query),
-                api_key if config.get("enhanced_mode") else None,
-                selected_sources=selected_sources,
-                year_range=(year_min, year_max),
-                min_citations=min_citations
-            )
-
-        if not results.empty:
-            st.subheader(f"📚 Total {len(results)} results after filters")
-            for _, row in results.iterrows():
-                st.markdown(f"""
-                <div class="paper-card">
-                    <div class="paper-title">{row['Title']}</div>
-                    <div class="paper-meta">
-                        <b>Source:</b> {row['Source']}<br>
-                        <b>Authors:</b> {row['Authors']}<br>
-                        <b>Year:</b> {row['Year']} | <b>Citations:</b> {row['Citations'] if row['Citations'] else 'N/A'}
-                    </div>
-                    <a class="link-btn" href="{row['URL']}" target="_blank">View Paper</a>
-                    {"<a class='link-btn' href='https://doi.org/" + row['DOI'] + "' target='_blank'>DOI</a>" if row['DOI'] else ""}
-                </div>
-                """, unsafe_allow_html=True)
+    if st.button("🔍 Search"):
+        if query.strip():
+            with st.spinner("Fetching papers..."):
+                results = combined_search(
+                    clean_query(query),
+                    api_key if config.get("enhanced_mode") else None,
+                    selected_sources=selected_sources,
+                    year_range=year_range,
+                    min_citations=min_citations
+                )
+            if results.empty:
+                st.error("No results found.")
+            else:
+                st.subheader(f"📚 Showing {len(results)} results")
+                for _, row in results.iterrows():
+                    st.markdown(f"""
+                        <div class="paper-card">
+                            <div class="paper-title">{row['Title']}</div>
+                            <div class="paper-meta">
+                                <b>Source:</b> {row['Source']}<br>
+                                <b>Authors:</b> {row['Authors']} <br>
+                                <b>Year:</b> {row['Year']} | <b>Citations:</b> {row['Citations']}
+                            </div>
+                            <div style="margin-top:0.5em;">
+                                <a class="link-btn" href="{row['URL']}" target="_blank">View Paper</a>
+                                {"<a class='link-btn' href='https://doi.org/" + row['DOI'] + "' target='_blank'>DOI</a>" if row['DOI'] else ""}
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
         else:
-            st.warning("No results match the filters.")
-
-    elif not query.strip():
-        st.warning("Please enter a search term.")
+            st.warning("Please enter a search term.")
 
 if __name__ == "__main__":
     main()
