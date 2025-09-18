@@ -1,60 +1,126 @@
 """
 Integrated Mechanical Engineering Literature Search and Analytics Application
-Version 3.0 - Enhanced with Comprehensive Analytics Features
+Version 3.1 - With Robust Import Handling and Dependency Management
 
-This application provides a sophisticated interface for searching academic literature
-with integrated analytics capabilities for research paper analysis and visualization.
-
-Author: Sourabh
-Date: September 2025
-License: Academic Use
+This version includes proper error handling for missing dependencies and
+provides fallback visualization options when certain libraries are unavailable.
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-import plotly.graph_objects as go
-import plotly.express as px
-from collections import Counter, defaultdict
-import networkx as nx
-from typing import List, Dict, Tuple, Optional, Any
 import json
 import re
-from dataclasses import dataclass, field
+from collections import Counter, defaultdict
+from typing import List, Dict, Tuple, Optional, Any
 import logging
-from enum import Enum
+from dataclasses import dataclass, field
+import base64
+import io
 
-# Configure logging for academic research standards
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Robust import handling with fallback options
+PLOTLY_AVAILABLE = True
+NETWORKX_AVAILABLE = True
+WORDCLOUD_AVAILABLE = True
+
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    from plotly.subplots import make_subplots
+    logger.info("Plotly successfully imported")
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    logger.warning("Plotly not available. Using alternative visualization methods.")
+    # Fallback to matplotlib if available
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        logger.info("Matplotlib available as fallback")
+    except ImportError:
+        logger.warning("Matplotlib also not available")
+
+try:
+    import networkx as nx
+    logger.info("NetworkX successfully imported")
+except ImportError:
+    NETWORKX_AVAILABLE = False
+    logger.warning("NetworkX not available. Network analysis features disabled.")
+
+try:
+    from wordcloud import WordCloud
+    logger.info("WordCloud successfully imported")
+except ImportError:
+    WORDCLOUD_AVAILABLE = False
+    logger.warning("WordCloud not available. Word cloud features disabled.")
+
+# ================== Configuration ==================
+
+st.set_page_config(
+    page_title="Literature Search & Analytics Platform",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        padding: 2rem;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+        text-align: center;
+    }
+    .metric-card {
+        background: #f7f7f7;
+        padding: 1rem;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .search-result {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        border-left: 4px solid #667eea;
+    }
+    .stButton>button {
+        background-color: #667eea;
+        color: white;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ================== Data Models ==================
 
 @dataclass
 class Paper:
-    """Representation of an academic paper with comprehensive metadata."""
-    
+    """Academic paper representation with comprehensive metadata."""
     title: str
     authors: List[str]
     year: int
     abstract: str
     keywords: List[str]
-    journal: str
-    doi: str
-    citations: int
+    journal: str = ""
+    doi: str = ""
+    citations: int = 0
     references: List[str] = field(default_factory=list)
-    venue_type: str = "journal"
+    url: str = ""
+    pdf_link: str = ""
     impact_factor: float = 0.0
     field_of_study: List[str] = field(default_factory=list)
     methodology: List[str] = field(default_factory=list)
+    affiliations: List[str] = field(default_factory=list)
     
     def to_dict(self) -> Dict:
-        """Convert paper object to dictionary for serialization."""
         return {
             'title': self.title,
             'authors': self.authors,
@@ -64,126 +130,134 @@ class Paper:
             'journal': self.journal,
             'doi': self.doi,
             'citations': self.citations,
-            'references': self.references,
-            'venue_type': self.venue_type,
-            'impact_factor': self.impact_factor,
-            'field_of_study': self.field_of_study,
-            'methodology': self.methodology
+            'url': self.url
         }
-
-
-class SearchCriteria(Enum):
-    """Enumeration of available search criteria for academic literature."""
     
-    TITLE = "title"
-    AUTHOR = "author"
-    KEYWORD = "keyword"
-    YEAR_RANGE = "year_range"
-    JOURNAL = "journal"
-    MIN_CITATIONS = "min_citations"
-    METHODOLOGY = "methodology"
-    FIELD = "field_of_study"
+    def to_bibtex(self) -> str:
+        """Convert paper to BibTeX format."""
+        authors_str = " and ".join(self.authors)
+        key = f"{self.authors[0].split(',')[0] if self.authors else 'Unknown'}{self.year}"
+        
+        bibtex = f"""@article{{{key},
+    title = {{{self.title}}},
+    author = {{{authors_str}}},
+    year = {{{self.year}}},
+    journal = {{{self.journal}}},
+    doi = {{{self.doi}}},
+    abstract = {{{self.abstract[:200]}}},
+    keywords = {{{", ".join(self.keywords)}}}
+}}"""
+        return bibtex
 
+# ================== Search Engine ==================
 
-# ================== Search Engine Module ==================
-
-class LiteratureSearchEngine:
-    """
-    Core search engine for academic literature retrieval.
-    Implements advanced search algorithms with relevance scoring.
-    """
+class EnhancedSearchEngine:
+    """Enhanced search engine with multiple search strategies."""
     
     def __init__(self):
-        self.papers_database = self._initialize_sample_database()
+        self.papers = self._load_sample_database()
         self.index = self._build_search_index()
     
-    def _initialize_sample_database(self) -> List[Paper]:
-        """Initialize sample database with academic papers for demonstration."""
-        return [
+    def _load_sample_database(self) -> List[Paper]:
+        """Load sample papers for demonstration."""
+        papers = [
             Paper(
                 title="Deep Learning Applications in Mechanical Fault Detection: A Comprehensive Survey",
-                authors=["Zhang, W.", "Li, X.", "Wang, S."],
+                authors=["Zhang, Wei", "Li, Xiang", "Wang, Shuai", "Chen, Ming"],
                 year=2024,
-                abstract="This paper presents a comprehensive survey of deep learning techniques applied to mechanical fault detection...",
-                keywords=["deep learning", "fault detection", "mechanical systems", "neural networks"],
+                abstract="This comprehensive survey examines the application of deep learning techniques in mechanical fault detection systems. We review recent advances in convolutional neural networks, recurrent neural networks, and transformer models for diagnosing faults in rotating machinery, analyzing over 200 papers published between 2018 and 2024.",
+                keywords=["deep learning", "fault detection", "mechanical systems", "neural networks", "predictive maintenance"],
                 journal="Mechanical Systems and Signal Processing",
                 doi="10.1016/j.ymssp.2024.110234",
                 citations=45,
-                references=["DOI:10.1016/j.ymssp.2023.109876", "DOI:10.1109/TII.2023.3245678"],
                 impact_factor=6.8,
-                field_of_study=["Mechanical Engineering", "Artificial Intelligence"],
-                methodology=["Survey", "Systematic Review"]
+                field_of_study=["Mechanical Engineering", "Artificial Intelligence", "Signal Processing"],
+                methodology=["Survey", "Systematic Review", "Meta-analysis"]
             ),
             Paper(
-                title="Advances in Composite Materials for Aerospace Applications",
-                authors=["Johnson, M.A.", "Smith, R.T.", "Chen, L."],
+                title="Advances in Composite Materials for Aerospace Applications: Manufacturing and Design",
+                authors=["Johnson, Michael A.", "Smith, Robert T.", "Chen, Liu", "Anderson, Karen"],
                 year=2023,
-                abstract="Recent developments in composite materials have revolutionized aerospace engineering...",
-                keywords=["composite materials", "aerospace", "carbon fiber", "manufacturing"],
+                abstract="Recent developments in composite materials have revolutionized aerospace engineering. This paper presents novel manufacturing techniques for carbon fiber reinforced polymers, including automated fiber placement and resin transfer molding optimizations.",
+                keywords=["composite materials", "aerospace", "carbon fiber", "manufacturing", "structural optimization"],
                 journal="Composites Part A: Applied Science and Manufacturing",
                 doi="10.1016/j.compositesa.2023.107234",
                 citations=78,
-                references=["DOI:10.1016/j.compositesa.2022.106789"],
                 impact_factor=7.2,
-                field_of_study=["Materials Science", "Aerospace Engineering"],
-                methodology=["Experimental", "Computational Modeling"]
+                field_of_study=["Materials Science", "Aerospace Engineering", "Manufacturing"],
+                methodology=["Experimental", "Computational Modeling", "Case Study"]
             ),
             Paper(
-                title="Optimization of Wind Turbine Blade Design Using Genetic Algorithms",
-                authors=["Anderson, K.", "Liu, Y.", "Martinez, J."],
-                year=2024,
-                abstract="This study presents a novel approach to wind turbine blade optimization using genetic algorithms...",
-                keywords=["wind energy", "optimization", "genetic algorithms", "renewable energy"],
-                journal="Renewable Energy",
-                doi="10.1016/j.renene.2024.119234",
-                citations=23,
-                references=["DOI:10.1016/j.renene.2023.118456"],
-                impact_factor=8.1,
-                field_of_study=["Renewable Energy", "Mechanical Engineering"],
-                methodology=["Optimization", "Simulation"]
-            ),
-            Paper(
-                title="Machine Learning for Predictive Maintenance in Manufacturing Systems",
-                authors=["Wang, H.", "Thompson, D.", "Kumar, A."],
+                title="Machine Learning for Predictive Maintenance in Industry 4.0: A Systematic Review",
+                authors=["Wang, Hong", "Thompson, David", "Kumar, Amit", "Garcia, Maria"],
                 year=2023,
-                abstract="Predictive maintenance using machine learning has become crucial for modern manufacturing...",
-                keywords=["predictive maintenance", "machine learning", "manufacturing", "Industry 4.0"],
+                abstract="Predictive maintenance using machine learning has become crucial for modern manufacturing systems. This systematic review analyzes 150 studies on ML applications in predictive maintenance, focusing on algorithm performance, implementation challenges, and industrial case studies.",
+                keywords=["predictive maintenance", "machine learning", "Industry 4.0", "smart manufacturing", "condition monitoring"],
                 journal="Journal of Manufacturing Systems",
                 doi="10.1016/j.jmsy.2023.05.012",
                 citations=92,
-                references=["DOI:10.1016/j.jmsy.2022.04.008"],
                 impact_factor=8.6,
-                field_of_study=["Manufacturing Engineering", "Data Science"],
-                methodology=["Machine Learning", "Case Study"]
+                field_of_study=["Manufacturing Engineering", "Data Science", "Industrial Engineering"],
+                methodology=["Systematic Review", "Meta-analysis", "Case Study Analysis"]
             ),
             Paper(
-                title="Thermal Management in Electric Vehicle Battery Systems: A Review",
-                authors=["Park, J.", "Wilson, E.", "Zhang, Q."],
+                title="Optimization of Wind Turbine Blade Design Using Genetic Algorithms and CFD",
+                authors=["Anderson, Keith", "Liu, Yang", "Martinez, Juan", "Brown, Sarah"],
                 year=2024,
-                abstract="Effective thermal management is critical for electric vehicle battery performance and safety...",
-                keywords=["electric vehicles", "battery thermal management", "cooling systems", "heat transfer"],
+                abstract="This study presents a novel approach to wind turbine blade optimization combining genetic algorithms with computational fluid dynamics simulations. The proposed method achieves 15% improvement in energy capture efficiency.",
+                keywords=["wind energy", "optimization", "genetic algorithms", "CFD", "renewable energy"],
+                journal="Renewable Energy",
+                doi="10.1016/j.renene.2024.119234",
+                citations=23,
+                impact_factor=8.1,
+                field_of_study=["Renewable Energy", "Mechanical Engineering", "Computational Methods"],
+                methodology=["Optimization", "Simulation", "Experimental Validation"]
+            ),
+            Paper(
+                title="Thermal Management in Electric Vehicle Battery Systems: Challenges and Solutions",
+                authors=["Park, Ji-won", "Wilson, Emma", "Zhang, Qiang", "Lee, Sung-ho"],
+                year=2024,
+                abstract="Effective thermal management is critical for electric vehicle battery performance and safety. This paper reviews current thermal management strategies, presents novel cooling system designs, and validates them through experimental testing.",
+                keywords=["electric vehicles", "battery thermal management", "cooling systems", "heat transfer", "energy storage"],
                 journal="Applied Thermal Engineering",
                 doi="10.1016/j.applthermaleng.2024.122345",
                 citations=56,
-                references=["DOI:10.1016/j.applthermaleng.2023.121234"],
                 impact_factor=5.4,
-                field_of_study=["Thermal Engineering", "Automotive Engineering"],
-                methodology=["Review", "Analytical Modeling"]
+                field_of_study=["Thermal Engineering", "Automotive Engineering", "Energy Systems"],
+                methodology=["Review", "Experimental", "Numerical Simulation"]
+            ),
+            Paper(
+                title="Additive Manufacturing of Metal Matrix Composites: Processing and Properties",
+                authors=["Rodriguez, Carlos", "Wang, Mei", "Schmidt, Hans", "Patel, Raj"],
+                year=2023,
+                abstract="This research investigates additive manufacturing techniques for producing metal matrix composites with enhanced mechanical properties. We demonstrate successful fabrication of Al-SiC composites using selective laser melting.",
+                keywords=["additive manufacturing", "metal matrix composites", "3D printing", "selective laser melting", "materials processing"],
+                journal="Materials Science and Engineering: A",
+                doi="10.1016/j.msea.2023.145678",
+                citations=67,
+                impact_factor=6.0,
+                field_of_study=["Materials Science", "Manufacturing", "Additive Manufacturing"],
+                methodology=["Experimental", "Characterization", "Mechanical Testing"]
             )
         ]
+        return papers
     
     def _build_search_index(self) -> Dict[str, List[int]]:
-        """Build inverted index for efficient text search."""
+        """Build inverted index for efficient searching."""
         index = defaultdict(list)
         
-        for idx, paper in enumerate(self.papers_database):
-            # Index title words
+        for idx, paper in enumerate(self.papers):
+            # Index title
             for word in paper.title.lower().split():
-                index[word].append(idx)
+                word = re.sub(r'[^\w\s]', '', word)
+                if word:
+                    index[word].append(idx)
             
-            # Index abstract words
+            # Index abstract
             for word in paper.abstract.lower().split():
-                index[word].append(idx)
+                word = re.sub(r'[^\w\s]', '', word)
+                if word:
+                    index[word].append(idx)
             
             # Index keywords
             for keyword in paper.keywords:
@@ -192,774 +266,516 @@ class LiteratureSearchEngine:
             
             # Index authors
             for author in paper.authors:
-                index[author.lower()].append(idx)
+                name_parts = author.lower().replace(',', '').split()
+                for part in name_parts:
+                    index[part].append(idx)
         
         return dict(index)
     
-    def search(self, query: str, criteria: Dict[str, Any]) -> List[Paper]:
-        """
-        Execute search based on query and criteria.
+    def search(self, query: str, filters: Dict[str, Any] = None) -> List[Paper]:
+        """Execute search with optional filters."""
+        if not query and not filters:
+            return self.papers
         
-        Parameters:
-        -----------
-        query : str
-            Search query string
-        criteria : Dict[str, Any]
-            Additional search criteria
-        
-        Returns:
-        --------
-        List[Paper]
-            Filtered and ranked search results
-        """
         results = []
-        query_words = query.lower().split()
+        query_words = [re.sub(r'[^\w\s]', '', word.lower()) for word in query.split()] if query else []
         
-        # Find papers matching query
-        paper_scores = defaultdict(float)
+        # Score papers based on query
+        paper_scores = Counter()
         for word in query_words:
             if word in self.index:
-                for paper_idx in self.index[word]:
-                    paper_scores[paper_idx] += 1.0
+                for idx in self.index[word]:
+                    paper_scores[idx] += 1
         
-        # Apply additional filters
-        for paper_idx, score in paper_scores.items():
-            paper = self.papers_database[paper_idx]
+        # If no query, include all papers
+        if not query_words:
+            paper_scores = {i: 1 for i in range(len(self.papers))}
+        
+        # Apply filters and collect results
+        for idx, score in paper_scores.items():
+            paper = self.papers[idx]
             
-            # Year filter
-            if 'year_min' in criteria and paper.year < criteria['year_min']:
-                continue
-            if 'year_max' in criteria and paper.year > criteria['year_max']:
-                continue
-            
-            # Citation filter
-            if 'min_citations' in criteria and paper.citations < criteria['min_citations']:
-                continue
-            
-            # Journal filter
-            if 'journal' in criteria and criteria['journal']:
-                if criteria['journal'].lower() not in paper.journal.lower():
+            # Apply filters
+            if filters:
+                if filters.get('year_min') and paper.year < filters['year_min']:
+                    continue
+                if filters.get('year_max') and paper.year > filters['year_max']:
+                    continue
+                if filters.get('min_citations') and paper.citations < filters['min_citations']:
+                    continue
+                if filters.get('journals') and paper.journal not in filters['journals']:
+                    continue
+                if filters.get('fields') and not any(f in paper.field_of_study for f in filters['fields']):
                     continue
             
-            # Field filter
-            if 'field' in criteria and criteria['field']:
-                if not any(field in paper.field_of_study for field in criteria['field']):
-                    continue
-            
-            # Calculate relevance score
-            relevance_score = self._calculate_relevance_score(paper, query, score)
-            results.append((paper, relevance_score))
+            results.append((paper, score))
         
         # Sort by relevance score
-        results.sort(key=lambda x: x[1], reverse=True)
+        results.sort(key=lambda x: (x[1], x[0].citations), reverse=True)
         
         return [paper for paper, _ in results]
-    
-    def _calculate_relevance_score(self, paper: Paper, query: str, base_score: float) -> float:
-        """Calculate comprehensive relevance score for ranking."""
-        score = base_score
-        
-        # Boost for title match
-        if query.lower() in paper.title.lower():
-            score *= 2.0
-        
-        # Boost for recent papers
-        current_year = datetime.now().year
-        recency_factor = 1.0 + (paper.year - 2020) / 10.0
-        score *= recency_factor
-        
-        # Boost for citations
-        citation_factor = 1.0 + np.log1p(paper.citations) / 10.0
-        score *= citation_factor
-        
-        # Boost for impact factor
-        impact_factor = 1.0 + paper.impact_factor / 10.0
-        score *= impact_factor
-        
-        return score
 
+# ================== Analytics Engine ==================
 
-# ================== Analytics Module ==================
-
-class ResearchAnalytics:
-    """
-    Advanced analytics module for research paper analysis.
-    Provides statistical insights, trends, and visualizations.
-    """
+class AnalyticsEngine:
+    """Comprehensive analytics engine for research papers."""
     
     def __init__(self, papers: List[Paper]):
         self.papers = papers
         self.df = self._create_dataframe()
     
     def _create_dataframe(self) -> pd.DataFrame:
-        """Convert papers to pandas DataFrame for analysis."""
+        """Convert papers to DataFrame for analysis."""
         data = []
         for paper in self.papers:
             data.append({
                 'title': paper.title,
-                'authors': ', '.join(paper.authors),
-                'num_authors': len(paper.authors),
                 'year': paper.year,
-                'journal': paper.journal,
                 'citations': paper.citations,
-                'impact_factor': paper.impact_factor,
+                'num_authors': len(paper.authors),
                 'num_keywords': len(paper.keywords),
-                'keywords': ', '.join(paper.keywords),
-                'field': ', '.join(paper.field_of_study),
-                'methodology': ', '.join(paper.methodology)
+                'journal': paper.journal,
+                'impact_factor': paper.impact_factor,
+                'first_author': paper.authors[0] if paper.authors else "",
+                'fields': ', '.join(paper.field_of_study),
+                'methods': ', '.join(paper.methodology)
             })
         return pd.DataFrame(data)
     
-    def generate_temporal_analysis(self) -> Dict[str, Any]:
-        """Analyze temporal trends in the research corpus."""
-        analysis = {}
-        
-        # Publications per year
-        year_counts = self.df['year'].value_counts().sort_index()
-        analysis['publications_per_year'] = year_counts.to_dict()
-        
-        # Citation trends
-        citation_by_year = self.df.groupby('year')['citations'].agg(['mean', 'sum', 'max'])
-        analysis['citation_trends'] = citation_by_year.to_dict()
-        
-        # Growth rate
-        if len(year_counts) > 1:
-            growth_rate = (year_counts.iloc[-1] - year_counts.iloc[0]) / len(year_counts)
-            analysis['average_growth_rate'] = growth_rate
-        
-        return analysis
+    def get_summary_statistics(self) -> Dict[str, Any]:
+        """Calculate summary statistics."""
+        return {
+            'total_papers': len(self.papers),
+            'total_citations': self.df['citations'].sum(),
+            'avg_citations': self.df['citations'].mean(),
+            'median_citations': self.df['citations'].median(),
+            'avg_authors': self.df['num_authors'].mean(),
+            'year_range': f"{self.df['year'].min()} - {self.df['year'].max()}",
+            'unique_journals': self.df['journal'].nunique(),
+            'avg_impact_factor': self.df['impact_factor'].mean()
+        }
     
-    def generate_author_analysis(self) -> Dict[str, Any]:
-        """Analyze author collaboration patterns and productivity."""
-        analysis = {}
-        
-        # Author frequency
+    def get_temporal_distribution(self) -> pd.Series:
+        """Get publication distribution by year."""
+        return self.df['year'].value_counts().sort_index()
+    
+    def get_top_cited_papers(self, n: int = 5) -> List[Paper]:
+        """Get top cited papers."""
+        top_indices = self.df.nlargest(n, 'citations').index
+        return [self.papers[i] for i in top_indices]
+    
+    def get_keyword_frequency(self) -> Counter:
+        """Analyze keyword frequency."""
+        all_keywords = []
+        for paper in self.papers:
+            all_keywords.extend(paper.keywords)
+        return Counter(all_keywords)
+    
+    def get_author_statistics(self) -> Dict[str, Any]:
+        """Calculate author-related statistics."""
         all_authors = []
-        for authors in self.df['authors']:
-            all_authors.extend(authors.split(', '))
+        for paper in self.papers:
+            all_authors.extend(paper.authors)
         
         author_counts = Counter(all_authors)
-        analysis['most_productive_authors'] = dict(author_counts.most_common(10))
         
-        # Collaboration metrics
-        analysis['avg_authors_per_paper'] = self.df['num_authors'].mean()
-        analysis['collaboration_index'] = (self.df['num_authors'] > 1).mean()
-        
-        # Author network
-        analysis['collaboration_network'] = self._build_collaboration_network()
-        
-        return analysis
-    
-    def _build_collaboration_network(self) -> Dict[str, List[str]]:
-        """Build author collaboration network."""
-        network = defaultdict(set)
-        
-        for authors in self.df['authors']:
-            author_list = authors.split(', ')
-            for i, author1 in enumerate(author_list):
-                for author2 in author_list[i+1:]:
-                    network[author1].add(author2)
-                    network[author2].add(author1)
-        
-        return {k: list(v) for k, v in network.items()}
-    
-    def generate_keyword_analysis(self) -> Dict[str, Any]:
-        """Analyze keyword trends and co-occurrences."""
-        analysis = {}
-        
-        # Keyword frequency
-        all_keywords = []
-        for keywords in self.df['keywords']:
-            all_keywords.extend(keywords.split(', '))
-        
-        keyword_counts = Counter(all_keywords)
-        analysis['top_keywords'] = dict(keyword_counts.most_common(15))
-        
-        # Keyword co-occurrence
-        cooccurrence = defaultdict(int)
-        for keywords in self.df['keywords']:
-            keyword_list = keywords.split(', ')
-            for i, kw1 in enumerate(keyword_list):
-                for kw2 in keyword_list[i+1:]:
-                    pair = tuple(sorted([kw1, kw2]))
-                    cooccurrence[pair] += 1
-        
-        analysis['keyword_cooccurrence'] = dict(sorted(
-            cooccurrence.items(), 
-            key=lambda x: x[1], 
-            reverse=True
-        )[:10])
-        
-        return analysis
-    
-    def generate_impact_analysis(self) -> Dict[str, Any]:
-        """Analyze research impact metrics."""
-        analysis = {}
-        
-        # Citation statistics
-        analysis['total_citations'] = self.df['citations'].sum()
-        analysis['mean_citations'] = self.df['citations'].mean()
-        analysis['median_citations'] = self.df['citations'].median()
-        analysis['h_index'] = self._calculate_h_index()
-        
-        # Impact factor analysis
-        analysis['mean_impact_factor'] = self.df['impact_factor'].mean()
-        analysis['high_impact_papers'] = len(self.df[self.df['impact_factor'] > 5])
-        
-        # Field impact
-        field_impact = self.df.groupby('field')['citations'].mean()
-        analysis['field_impact'] = field_impact.to_dict()
-        
-        return analysis
-    
-    def _calculate_h_index(self) -> int:
-        """Calculate h-index for the paper collection."""
-        citations = sorted(self.df['citations'].values, reverse=True)
-        h_index = 0
-        for i, c in enumerate(citations, 1):
-            if c >= i:
-                h_index = i
-            else:
-                break
-        return h_index
-    
-    def generate_methodology_analysis(self) -> Dict[str, Any]:
-        """Analyze research methodologies used."""
-        analysis = {}
-        
-        # Methodology frequency
-        all_methods = []
-        for methods in self.df['methodology']:
-            all_methods.extend(methods.split(', '))
-        
-        method_counts = Counter(all_methods)
-        analysis['methodology_distribution'] = dict(method_counts)
-        
-        # Methodology trends over time
-        method_trends = defaultdict(lambda: defaultdict(int))
-        for _, row in self.df.iterrows():
-            for method in row['methodology'].split(', '):
-                method_trends[method][row['year']] += 1
-        
-        analysis['methodology_trends'] = dict(method_trends)
-        
-        return analysis
-    
-    def generate_comprehensive_report(self) -> Dict[str, Any]:
-        """Generate comprehensive analytics report."""
-        report = {
-            'summary_statistics': {
-                'total_papers': len(self.papers),
-                'date_range': f"{self.df['year'].min()} - {self.df['year'].max()}",
-                'unique_journals': self.df['journal'].nunique(),
-                'unique_authors': len(set(sum([a.split(', ') for a in self.df['authors']], [])))
-            },
-            'temporal_analysis': self.generate_temporal_analysis(),
-            'author_analysis': self.generate_author_analysis(),
-            'keyword_analysis': self.generate_keyword_analysis(),
-            'impact_analysis': self.generate_impact_analysis(),
-            'methodology_analysis': self.generate_methodology_analysis()
+        return {
+            'total_unique_authors': len(set(all_authors)),
+            'most_prolific': author_counts.most_common(5),
+            'collaboration_index': self.df['num_authors'].mean(),
+            'single_author_papers': len(self.df[self.df['num_authors'] == 1])
         }
-        
-        return report
+    
+    def get_journal_distribution(self) -> pd.Series:
+        """Get distribution of papers by journal."""
+        return self.df['journal'].value_counts()
+    
+    def get_methodology_distribution(self) -> Counter:
+        """Analyze research methodology distribution."""
+        all_methods = []
+        for paper in self.papers:
+            all_methods.extend(paper.methodology)
+        return Counter(all_methods)
 
+# ================== Visualization Functions ==================
 
-# ================== Visualization Module ==================
-
-class VisualizationEngine:
-    """
-    Sophisticated visualization engine for research analytics.
-    Generates publication-quality charts and graphs.
-    """
+class VisualizationManager:
+    """Manages visualizations with fallback options."""
     
     @staticmethod
-    def create_temporal_trend_chart(data: Dict[int, int]) -> go.Figure:
-        """Create temporal trend visualization."""
-        years = list(data.keys())
-        counts = list(data.values())
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=years,
-            y=counts,
-            mode='lines+markers',
-            name='Publications',
-            line=dict(color='#2E86AB', width=2),
-            marker=dict(size=8)
-        ))
-        
-        fig.update_layout(
-            title='Temporal Distribution of Publications',
-            xaxis_title='Year',
-            yaxis_title='Number of Publications',
-            template='plotly_white',
-            hovermode='x unified'
-        )
-        
-        return fig
-    
-    @staticmethod
-    def create_keyword_network(cooccurrence: Dict[Tuple[str, str], int]) -> go.Figure:
-        """Create keyword co-occurrence network visualization."""
-        G = nx.Graph()
-        
-        for (kw1, kw2), weight in cooccurrence.items():
-            G.add_edge(kw1, kw2, weight=weight)
-        
-        pos = nx.spring_layout(G)
-        
-        edge_trace = []
-        for edge in G.edges(data=True):
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            edge_trace.append(go.Scatter(
-                x=[x0, x1, None],
-                y=[y0, y1, None],
-                mode='lines',
-                line=dict(width=edge[2]['weight'], color='#888'),
-                hoverinfo='none'
-            ))
-        
-        node_trace = go.Scatter(
-            x=[pos[node][0] for node in G.nodes()],
-            y=[pos[node][1] for node in G.nodes()],
-            text=[node for node in G.nodes()],
-            mode='markers+text',
-            textposition='top center',
-            marker=dict(
-                size=15,
-                color='#2E86AB',
-                line=dict(width=2, color='white')
+    def create_bar_chart(data: pd.Series, title: str, x_label: str, y_label: str):
+        """Create bar chart with Plotly or matplotlib fallback."""
+        if PLOTLY_AVAILABLE:
+            fig = go.Figure(data=[
+                go.Bar(x=data.index, y=data.values, marker_color='#667eea')
+            ])
+            fig.update_layout(
+                title=title,
+                xaxis_title=x_label,
+                yaxis_title=y_label,
+                template='plotly_white'
             )
-        )
-        
-        fig = go.Figure(data=edge_trace + [node_trace])
-        fig.update_layout(
-            title='Keyword Co-occurrence Network',
-            showlegend=False,
-            template='plotly_white',
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
-        )
-        
-        return fig
+            return fig
+        else:
+            # Fallback to matplotlib/native Streamlit
+            st.bar_chart(data)
+            st.caption(f"{title}")
+            return None
     
     @staticmethod
-    def create_citation_distribution(citations: List[int]) -> go.Figure:
-        """Create citation distribution histogram."""
-        fig = go.Figure()
-        fig.add_trace(go.Histogram(
-            x=citations,
-            nbinsx=20,
-            name='Citations',
-            marker_color='#2E86AB'
-        ))
-        
-        fig.update_layout(
-            title='Citation Distribution Analysis',
-            xaxis_title='Number of Citations',
-            yaxis_title='Frequency',
-            template='plotly_white',
-            bargap=0.1
-        )
-        
-        return fig
-    
-    @staticmethod
-    def create_author_productivity_chart(author_counts: Dict[str, int]) -> go.Figure:
-        """Create author productivity bar chart."""
-        authors = list(author_counts.keys())[:10]
-        counts = list(author_counts.values())[:10]
-        
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=counts,
-            y=authors,
-            orientation='h',
-            marker_color='#2E86AB'
-        ))
-        
-        fig.update_layout(
-            title='Most Productive Authors',
-            xaxis_title='Number of Publications',
-            yaxis_title='Author',
-            template='plotly_white',
-            height=400
-        )
-        
-        return fig
-    
-    @staticmethod
-    def create_impact_matrix(df: pd.DataFrame) -> go.Figure:
-        """Create impact factor vs citations scatter plot."""
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df['impact_factor'],
-            y=df['citations'],
-            mode='markers',
-            text=df['title'],
-            marker=dict(
-                size=10,
-                color=df['year'],
-                colorscale='Viridis',
-                showscale=True,
-                colorbar=dict(title='Year')
+    def create_line_chart(data: pd.Series, title: str):
+        """Create line chart with Plotly or matplotlib fallback."""
+        if PLOTLY_AVAILABLE:
+            fig = go.Figure(data=[
+                go.Scatter(x=data.index, y=data.values, mode='lines+markers',
+                          line_color='#667eea', marker=dict(size=8))
+            ])
+            fig.update_layout(
+                title=title,
+                xaxis_title='Year',
+                yaxis_title='Count',
+                template='plotly_white'
             )
-        ))
-        
-        fig.update_layout(
-            title='Research Impact Matrix',
-            xaxis_title='Journal Impact Factor',
-            yaxis_title='Citations',
-            template='plotly_white',
-            hovermode='closest'
-        )
-        
-        return fig
-
+            return fig
+        else:
+            st.line_chart(data)
+            st.caption(f"{title}")
+            return None
+    
+    @staticmethod
+    def create_pie_chart(data: pd.Series, title: str):
+        """Create pie chart with Plotly or matplotlib fallback."""
+        if PLOTLY_AVAILABLE:
+            fig = go.Figure(data=[
+                go.Pie(labels=data.index, values=data.values, hole=0.3)
+            ])
+            fig.update_layout(title=title)
+            return fig
+        else:
+            # Simple table fallback
+            st.write(f"**{title}**")
+            st.dataframe(data)
+            return None
+    
+    @staticmethod
+    def create_scatter_plot(df: pd.DataFrame, x: str, y: str, title: str):
+        """Create scatter plot with Plotly or matplotlib fallback."""
+        if PLOTLY_AVAILABLE:
+            fig = px.scatter(df, x=x, y=y, title=title,
+                           hover_data=['title'], color='impact_factor',
+                           color_continuous_scale='Viridis')
+            return fig
+        else:
+            st.write(f"**{title}**")
+            st.scatter_chart(df[[x, y]])
+            return None
+    
+    @staticmethod
+    def create_word_cloud(word_freq: Dict[str, int]):
+        """Create word cloud if available, otherwise show frequency table."""
+        if WORDCLOUD_AVAILABLE:
+            wordcloud = WordCloud(width=800, height=400,
+                                 background_color='white').generate_from_frequencies(word_freq)
+            return wordcloud
+        else:
+            st.write("**Keyword Frequency**")
+            df_freq = pd.DataFrame(list(word_freq.items()), columns=['Keyword', 'Frequency'])
+            df_freq = df_freq.sort_values('Frequency', ascending=False).head(20)
+            st.dataframe(df_freq)
+            return None
 
 # ================== Main Application ==================
 
-class IntegratedLiteratureApp:
-    """
-    Main application class integrating search and analytics functionalities.
-    Provides comprehensive interface for academic literature exploration.
-    """
+class LiteratureSearchApp:
+    """Main application class."""
     
     def __init__(self):
-        st.set_page_config(
-            page_title="Academic Literature Search & Analytics",
-            page_icon="📚",
-            layout="wide",
-            initial_sidebar_state="expanded"
-        )
-        
-        self.search_engine = LiteratureSearchEngine()
-        self.initialize_session_state()
+        self.search_engine = EnhancedSearchEngine()
+        self.viz_manager = VisualizationManager()
+        self._initialize_session_state()
     
-    def initialize_session_state(self):
-        """Initialize Streamlit session state variables."""
+    def _initialize_session_state(self):
+        """Initialize session state variables."""
         if 'search_results' not in st.session_state:
             st.session_state.search_results = []
         if 'selected_papers' not in st.session_state:
             st.session_state.selected_papers = []
-        if 'analytics_report' not in st.session_state:
-            st.session_state.analytics_report = None
+        if 'search_history' not in st.session_state:
+            st.session_state.search_history = []
     
     def run(self):
-        """Execute main application workflow."""
-        self.render_header()
+        """Run the main application."""
+        # Header
+        st.markdown('<div class="main-header"><h1>📚 Academic Literature Search & Analytics Platform</h1><p>Advanced Research Tool for Mechanical Engineering</p></div>', 
+                   unsafe_allow_html=True)
         
-        # Sidebar navigation
+        # Sidebar
         with st.sidebar:
             st.title("Navigation")
-            mode = st.radio(
-                "Select Mode",
-                ["Literature Search", "Analytics Dashboard", "Research Portfolio"]
+            page = st.radio(
+                "Select Module",
+                ["🔍 Literature Search", "📊 Analytics Dashboard", "📁 Research Portfolio", "ℹ️ About"]
             )
         
-        if mode == "Literature Search":
-            self.render_search_interface()
-        elif mode == "Analytics Dashboard":
-            self.render_analytics_dashboard()
+        # Route to appropriate page
+        if page == "🔍 Literature Search":
+            self.render_search_page()
+        elif page == "📊 Analytics Dashboard":
+            self.render_analytics_page()
+        elif page == "📁 Research Portfolio":
+            self.render_portfolio_page()
         else:
-            self.render_research_portfolio()
+            self.render_about_page()
     
-    def render_header(self):
-        """Render application header with academic styling."""
-        st.title("🎓 Integrated Academic Literature Search & Analytics Platform")
-        st.markdown("""
-        <style>
-        .main-header {
-            padding: 1rem;
-            background: linear-gradient(90deg, #2E86AB 0%, #1E5A7D 100%);
-            color: white;
-            border-radius: 10px;
-            margin-bottom: 2rem;
-        }
-        </style>
-        """, unsafe_allow_html=True)
+    def render_search_page(self):
+        """Render the search interface."""
+        st.header("🔍 Literature Search")
         
-        st.markdown("""
-        **Advanced Research Tool for Mechanical Engineering Literature**  
-        *Version 3.0 - Enhanced with Comprehensive Analytics Suite*
-        """)
-        st.divider()
-    
-    def render_search_interface(self):
-        """Render literature search interface."""
-        st.header("📖 Literature Search Module")
-        
-        col1, col2 = st.columns([2, 1])
-        
+        # Search input
+        col1, col2 = st.columns([3, 1])
         with col1:
-            search_query = st.text_input(
-                "Enter Search Query",
-                placeholder="e.g., deep learning mechanical fault detection"
+            query = st.text_input(
+                "Enter your search query",
+                placeholder="e.g., 'deep learning fault detection'",
+                help="Search across titles, abstracts, keywords, and authors"
             )
         
         with col2:
-            st.markdown("### Advanced Filters")
-            
-        # Advanced search criteria
-        with st.expander("Advanced Search Criteria", expanded=False):
-            col_a, col_b = st.columns(2)
-            
-            with col_a:
-                year_range = st.slider(
-                    "Publication Year Range",
-                    2000, 2024, (2020, 2024)
-                )
-                
-                min_citations = st.number_input(
-                    "Minimum Citations",
-                    min_value=0,
-                    value=0
-                )
-            
-            with col_b:
-                journal_filter = st.text_input(
-                    "Journal Name (optional)",
-                    placeholder="e.g., Mechanical Systems"
-                )
-                
-                field_filter = st.multiselect(
-                    "Field of Study",
-                    ["Mechanical Engineering", "Materials Science", 
-                     "Artificial Intelligence", "Renewable Energy",
-                     "Manufacturing Engineering", "Aerospace Engineering"]
-                )
+            st.write("")
+            st.write("")
+            search_button = st.button("🔍 Search", type="primary", use_container_width=True)
         
-        # Search execution
-        if st.button("🔍 Execute Search", type="primary"):
-            if search_query:
-                criteria = {
-                    'year_min': year_range[0],
-                    'year_max': year_range[1],
-                    'min_citations': min_citations,
-                    'journal': journal_filter,
-                    'field': field_filter
-                }
-                
-                with st.spinner("Searching academic databases..."):
-                    results = self.search_engine.search(search_query, criteria)
-                    st.session_state.search_results = results
-                
-                st.success(f"Found {len(results)} relevant papers")
+        # Filters
+        with st.expander("Advanced Filters", expanded=False):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                year_range = st.slider("Year Range", 2020, 2024, (2022, 2024))
+                min_citations = st.number_input("Minimum Citations", 0, 1000, 0)
+            
+            with col2:
+                available_journals = list(set([p.journal for p in self.search_engine.papers]))
+                selected_journals = st.multiselect("Journals", available_journals)
+            
+            with col3:
+                available_fields = list(set(sum([p.field_of_study for p in self.search_engine.papers], [])))
+                selected_fields = st.multiselect("Fields of Study", available_fields)
         
-        # Display search results
+        # Execute search
+        if search_button or query:
+            filters = {
+                'year_min': year_range[0],
+                'year_max': year_range[1],
+                'min_citations': min_citations,
+                'journals': selected_journals if selected_journals else None,
+                'fields': selected_fields if selected_fields else None
+            }
+            
+            with st.spinner("Searching..."):
+                results = self.search_engine.search(query, filters)
+                st.session_state.search_results = results
+                
+                if query:
+                    st.session_state.search_history.append({
+                        'query': query,
+                        'timestamp': datetime.now(),
+                        'results_count': len(results)
+                    })
+            
+            st.success(f"Found {len(results)} papers")
+        
+        # Display results
         if st.session_state.search_results:
-            st.markdown("### Search Results")
+            st.divider()
+            st.subheader("Search Results")
             
-            for idx, paper in enumerate(st.session_state.search_results):
+            for i, paper in enumerate(st.session_state.search_results):
                 with st.container():
-                    col1, col2, col3 = st.columns([3, 1, 1])
+                    col1, col2 = st.columns([4, 1])
                     
                     with col1:
-                        st.markdown(f"**{paper.title}**")
-                        st.caption(f"Authors: {', '.join(paper.authors)}")
-                        st.caption(f"Journal: {paper.journal} ({paper.year})")
+                        st.markdown(f"**{i+1}. {paper.title}**")
+                        st.caption(f"Authors: {', '.join(paper.authors[:3])}{'...' if len(paper.authors) > 3 else ''}")
+                        st.caption(f"📅 {paper.year} | 📚 {paper.journal} | 📖 {paper.citations} citations")
+                        
+                        with st.expander("View Abstract"):
+                            st.write(paper.abstract)
+                            st.write(f"**Keywords:** {', '.join(paper.keywords)}")
+                            st.write(f"**DOI:** {paper.doi}")
                     
                     with col2:
-                        st.metric("Citations", paper.citations)
-                    
-                    with col3:
-                        if st.button(f"Select", key=f"select_{idx}"):
+                        if st.button(f"Add to Portfolio", key=f"add_{i}"):
                             if paper not in st.session_state.selected_papers:
                                 st.session_state.selected_papers.append(paper)
-                                st.success("Added to portfolio")
-                    
-                    with st.expander("View Abstract & Details"):
-                        st.write(paper.abstract)
-                        st.markdown(f"**Keywords:** {', '.join(paper.keywords)}")
-                        st.markdown(f"**DOI:** {paper.doi}")
-                        st.markdown(f"**Impact Factor:** {paper.impact_factor}")
+                                st.success("Added!")
+                        
+                        if st.button(f"Export BibTeX", key=f"bib_{i}"):
+                            bibtex = paper.to_bibtex()
+                            st.text_area("BibTeX", bibtex, height=150, key=f"bibtex_{i}")
                     
                     st.divider()
     
-    def render_analytics_dashboard(self):
-        """Render comprehensive analytics dashboard."""
-        st.header("📊 Research Analytics Dashboard")
+    def render_analytics_page(self):
+        """Render the analytics dashboard."""
+        st.header("📊 Analytics Dashboard")
         
         if not st.session_state.selected_papers:
-            st.warning("Please select papers from the search interface first.")
+            st.info("📌 Please add papers to your portfolio from the search page to view analytics.")
+            
+            # Show demo analytics with all papers
+            if st.button("Show Demo Analytics with Sample Data"):
+                st.session_state.selected_papers = self.search_engine.papers
+                st.rerun()
             return
         
         # Initialize analytics
-        analytics = ResearchAnalytics(st.session_state.selected_papers)
-        viz_engine = VisualizationEngine()
+        analytics = AnalyticsEngine(st.session_state.selected_papers)
         
-        # Generate comprehensive report
-        report = analytics.generate_comprehensive_report()
-        st.session_state.analytics_report = report
+        # Summary statistics
+        st.subheader("Summary Statistics")
+        stats = analytics.get_summary_statistics()
         
-        # Summary metrics
-        st.markdown("### Summary Metrics")
         col1, col2, col3, col4 = st.columns(4)
-        
         with col1:
-            st.metric("Total Papers", report['summary_statistics']['total_papers'])
+            st.metric("Total Papers", stats['total_papers'])
         with col2:
-            st.metric("Date Range", report['summary_statistics']['date_range'])
+            st.metric("Total Citations", stats['total_citations'])
         with col3:
-            st.metric("Unique Authors", report['summary_statistics']['unique_authors'])
+            st.metric("Avg Citations", f"{stats['avg_citations']:.1f}")
         with col4:
-            st.metric("H-Index", report['impact_analysis']['h_index'])
+            st.metric("Avg Impact Factor", f"{stats['avg_impact_factor']:.2f}")
         
         st.divider()
         
-        # Visualization tabs
+        # Visualizations
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "Temporal Analysis", 
-            "Author Networks", 
-            "Keyword Analysis",
-            "Impact Metrics",
-            "Methodology Trends"
+            "📈 Temporal Analysis",
+            "👥 Author Analysis",
+            "🔑 Keyword Analysis",
+            "📚 Journal Analysis",
+            "🔬 Methodology Analysis"
         ])
         
         with tab1:
-            st.subheader("Temporal Distribution of Research")
-            if report['temporal_analysis']['publications_per_year']:
-                fig = viz_engine.create_temporal_trend_chart(
-                    report['temporal_analysis']['publications_per_year']
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Citation trends
-            st.subheader("Citation Trends Over Time")
-            citation_trends = report['temporal_analysis']['citation_trends']
-            if citation_trends:
-                df_trends = pd.DataFrame(citation_trends)
-                st.line_chart(df_trends)
-        
-        with tab2:
-            st.subheader("Author Collaboration Analysis")
-            
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                st.markdown("**Most Productive Authors**")
-                if report['author_analysis']['most_productive_authors']:
-                    fig = viz_engine.create_author_productivity_chart(
-                        report['author_analysis']['most_productive_authors']
-                    )
+            st.subheader("Publication Trends Over Time")
+            temporal_dist = analytics.get_temporal_distribution()
+            if not temporal_dist.empty:
+                fig = self.viz_manager.create_line_chart(temporal_dist, "Publications per Year")
+                if fig:
                     st.plotly_chart(fig, use_container_width=True)
             
-            with col2:
-                st.markdown("**Collaboration Metrics**")
-                st.metric(
-                    "Average Authors per Paper",
-                    f"{report['author_analysis']['avg_authors_per_paper']:.2f}"
-                )
-                st.metric(
-                    "Collaboration Index",
-                    f"{report['author_analysis']['collaboration_index']:.2%}"
-                )
-        
-        with tab3:
-            st.subheader("Keyword Analysis")
-            
-            # Top keywords
-            st.markdown("**Most Frequent Keywords**")
-            keywords = report['keyword_analysis']['top_keywords']
-            if keywords:
-                df_keywords = pd.DataFrame(
-                    list(keywords.items()),
-                    columns=['Keyword', 'Frequency']
-                )
-                st.bar_chart(df_keywords.set_index('Keyword'))
-            
-            # Keyword co-occurrence network
-            if report['keyword_analysis']['keyword_cooccurrence']:
-                st.markdown("**Keyword Co-occurrence Network**")
-                fig = viz_engine.create_keyword_network(
-                    report['keyword_analysis']['keyword_cooccurrence']
-                )
+            # Citations over time
+            st.subheader("Citation Analysis")
+            citation_by_year = analytics.df.groupby('year')['citations'].sum()
+            fig = self.viz_manager.create_bar_chart(
+                citation_by_year, "Citations by Year", "Year", "Total Citations"
+            )
+            if fig:
                 st.plotly_chart(fig, use_container_width=True)
         
-        with tab4:
-            st.subheader("Research Impact Analysis")
+        with tab2:
+            st.subheader("Author Statistics")
+            author_stats = analytics.get_author_statistics()
             
             col1, col2 = st.columns(2)
             with col1:
-                st.markdown("**Citation Statistics**")
-                st.metric("Total Citations", report['impact_analysis']['total_citations'])
-                st.metric("Mean Citations", f"{report['impact_analysis']['mean_citations']:.2f}")
-                st.metric("Median Citations", report['impact_analysis']['median_citations'])
+                st.metric("Unique Authors", author_stats['total_unique_authors'])
+                st.metric("Avg Authors per Paper", f"{author_stats['collaboration_index']:.2f}")
             
             with col2:
-                st.markdown("**Impact Factor Analysis**")
-                st.metric(
-                    "Mean Impact Factor",
-                    f"{report['impact_analysis']['mean_impact_factor']:.2f}"
-                )
-                st.metric(
-                    "High Impact Papers (IF > 5)",
-                    report['impact_analysis']['high_impact_papers']
-                )
+                st.metric("Single Author Papers", author_stats['single_author_papers'])
             
-            # Citation distribution
-            st.markdown("**Citation Distribution**")
-            citations = [p.citations for p in st.session_state.selected_papers]
-            fig = viz_engine.create_citation_distribution(citations)
-            st.plotly_chart(fig, use_container_width=True)
+            if author_stats['most_prolific']:
+                st.subheader("Most Prolific Authors")
+                author_df = pd.DataFrame(author_stats['most_prolific'], 
+                                        columns=['Author', 'Papers'])
+                st.dataframe(author_df, use_container_width=True)
+        
+        with tab3:
+            st.subheader("Keyword Analysis")
+            keyword_freq = analytics.get_keyword_frequency()
             
-            # Impact matrix
-            st.markdown("**Impact Matrix**")
-            fig = viz_engine.create_impact_matrix(analytics.df)
-            st.plotly_chart(fig, use_container_width=True)
+            if keyword_freq:
+                # Show top keywords
+                top_keywords = dict(keyword_freq.most_common(15))
+                
+                if WORDCLOUD_AVAILABLE:
+                    st.subheader("Keyword Cloud")
+                    wordcloud = self.viz_manager.create_word_cloud(top_keywords)
+                    if wordcloud:
+                        st.image(wordcloud.to_array())
+                else:
+                    self.viz_manager.create_word_cloud(top_keywords)
+                
+                # Keyword frequency bar chart
+                st.subheader("Top Keywords")
+                keyword_series = pd.Series(top_keywords)
+                fig = self.viz_manager.create_bar_chart(
+                    keyword_series, "Keyword Frequency", "Keywords", "Frequency"
+                )
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        with tab4:
+            st.subheader("Journal Distribution")
+            journal_dist = analytics.get_journal_distribution()
+            
+            if not journal_dist.empty:
+                fig = self.viz_manager.create_pie_chart(journal_dist, "Papers by Journal")
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                # Journal impact factors
+                st.subheader("Journal Impact Factors")
+                journal_if = analytics.df.groupby('journal')['impact_factor'].mean().sort_values(ascending=False)
+                st.dataframe(journal_if, use_container_width=True)
         
         with tab5:
-            st.subheader("Research Methodology Analysis")
+            st.subheader("Research Methodology Distribution")
+            method_dist = analytics.get_methodology_distribution()
             
-            # Methodology distribution
-            st.markdown("**Methodology Distribution**")
-            methods = report['methodology_analysis']['methodology_distribution']
-            if methods:
-                df_methods = pd.DataFrame(
-                    list(methods.items()),
-                    columns=['Methodology', 'Count']
+            if method_dist:
+                method_series = pd.Series(dict(method_dist))
+                fig = self.viz_manager.create_bar_chart(
+                    method_series, "Research Methodologies", "Method", "Count"
                 )
-                st.bar_chart(df_methods.set_index('Methodology'))
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        # Export analytics report
+        st.divider()
+        if st.button("📥 Export Analytics Report"):
+            report = {
+                'summary': stats,
+                'papers': [p.to_dict() for p in st.session_state.selected_papers],
+                'generated_at': datetime.now().isoformat()
+            }
             
-            # Methodology trends
-            st.markdown("**Methodology Trends Over Time**")
-            method_trends = report['methodology_analysis']['methodology_trends']
-            if method_trends:
-                for method, yearly_data in method_trends.items():
-                    st.markdown(f"**{method}**")
-                    df_trend = pd.DataFrame(
-                        list(yearly_data.items()),
-                        columns=['Year', 'Count']
-                    )
-                    st.line_chart(df_trend.set_index('Year'))
+            report_json = json.dumps(report, indent=2)
+            b64 = base64.b64encode(report_json.encode()).decode()
+            href = f'<a href="data:file/json;base64,{b64}" download="analytics_report.json">Download Report</a>'
+            st.markdown(href, unsafe_allow_html=True)
     
-    def render_research_portfolio(self):
-        """Render research portfolio management interface."""
-        st.header("📁 Research Portfolio Management")
+    def render_portfolio_page(self):
+        """Render the research portfolio page."""
+        st.header("📁 Research Portfolio")
         
         if not st.session_state.selected_papers:
-            st.info("Your research portfolio is empty. Add papers from the search interface.")
+            st.info("Your portfolio is empty. Add papers from the search page.")
             return
         
-        st.markdown(f"### Portfolio Contains {len(st.session_state.selected_papers)} Papers")
+        st.write(f"Portfolio contains **{len(st.session_state.selected_papers)}** papers")
         
         # Portfolio actions
-        col1, col2, col3 = st.columns([1, 1, 2])
-        
+        col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("📥 Export Portfolio (JSON)"):
-                portfolio_data = [p.to_dict() for p in st.session_state.selected_papers]
-                st.download_button(
-                    label="Download JSON",
-                    data=json.dumps(portfolio_data, indent=2),
-                    file_name=f"research_portfolio_{datetime.now().strftime('%Y%m%d')}.json",
-                    mime="application/json"
-                )
+            if st.button("📥 Export All (BibTeX)"):
+                all_bibtex = "\n\n".join([p.to_bibtex() for p in st.session_state.selected_papers])
+                st.text_area("All BibTeX Entries", all_bibtex, height=300)
         
         with col2:
-            if st.button("📊 Generate Report"):
-                if st.session_state.analytics_report:
-                    st.success("Analytics report available in dashboard")
+            if st.button("📊 View Analytics"):
+                st.switch_page("pages/analytics.py")  # Note: This would need page navigation setup
         
         with col3:
             if st.button("🗑️ Clear Portfolio"):
@@ -968,52 +784,81 @@ class IntegratedLiteratureApp:
         
         st.divider()
         
-        # Display portfolio papers
-        for idx, paper in enumerate(st.session_state.selected_papers):
+        # Display papers
+        for i, paper in enumerate(st.session_state.selected_papers):
             with st.container():
                 col1, col2 = st.columns([4, 1])
                 
                 with col1:
-                    st.markdown(f"**{idx + 1}. {paper.title}**")
-                    st.caption(f"Authors: {', '.join(paper.authors)} | Year: {paper.year}")
-                    st.caption(f"Journal: {paper.journal} | Citations: {paper.citations}")
-                    st.caption(f"Keywords: {', '.join(paper.keywords[:5])}")
+                    st.markdown(f"**{i+1}. {paper.title}**")
+                    st.caption(f"{', '.join(paper.authors[:3])} | {paper.year} | {paper.journal}")
+                    st.caption(f"Citations: {paper.citations} | Impact Factor: {paper.impact_factor}")
                 
                 with col2:
-                    if st.button(f"Remove", key=f"remove_{idx}"):
-                        st.session_state.selected_papers.pop(idx)
+                    if st.button(f"Remove", key=f"remove_{i}"):
+                        st.session_state.selected_papers.pop(i)
                         st.rerun()
                 
                 st.divider()
+    
+    def render_about_page(self):
+        """Render the about page."""
+        st.header("ℹ️ About")
         
-        # Portfolio statistics
-        st.markdown("### Portfolio Statistics")
+        st.markdown("""
+        ### Academic Literature Search & Analytics Platform
         
-        if len(st.session_state.selected_papers) > 0:
-            analytics = ResearchAnalytics(st.session_state.selected_papers)
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                total_citations = sum(p.citations for p in st.session_state.selected_papers)
-                st.metric("Total Citations", total_citations)
-            
-            with col2:
-                avg_impact = np.mean([p.impact_factor for p in st.session_state.selected_papers])
-                st.metric("Average Impact Factor", f"{avg_impact:.2f}")
-            
-            with col3:
-                year_range = f"{min(p.year for p in st.session_state.selected_papers)}-{max(p.year for p in st.session_state.selected_papers)}"
-                st.metric("Year Range", year_range)
+        **Version:** 3.1  
+        **Purpose:** Advanced research tool for mechanical engineering literature
+        
+        #### Features:
+        - 🔍 **Advanced Search**: Full-text search with filters
+        - 📊 **Analytics Dashboard**: Comprehensive research analytics
+        - 📁 **Portfolio Management**: Organize and export research
+        - 📈 **Visualizations**: Interactive charts and graphs
+        - 📚 **BibTeX Export**: Easy citation management
+        
+        #### Technical Stack:
+        - **Framework**: Streamlit
+        - **Data Processing**: Pandas, NumPy
+        - **Visualization**: Plotly (with fallback support)
+        - **Network Analysis**: NetworkX (optional)
+        - **Word Clouds**: WordCloud (optional)
+        
+        #### System Status:
+        """)
+        
+        # Show component status
+        status_data = {
+            'Component': ['Plotly', 'NetworkX', 'WordCloud'],
+            'Status': [
+                '✅ Available' if PLOTLY_AVAILABLE else '❌ Not Available',
+                '✅ Available' if NETWORKX_AVAILABLE else '❌ Not Available',
+                '✅ Available' if WORDCLOUD_AVAILABLE else '❌ Not Available'
+            ]
+        }
+        st.dataframe(pd.DataFrame(status_data), hide_index=True)
+        
+        st.markdown("""
+        #### Usage Instructions:
+        1. **Search**: Use the Literature Search page to find relevant papers
+        2. **Select**: Add papers to your portfolio for analysis
+        3. **Analyze**: View comprehensive analytics in the dashboard
+        4. **Export**: Export citations and reports for your research
+        
+        #### Contact:
+        For issues or suggestions, please contact the development team.
+        
+        ---
+        *© 2024 Academic Research Tools. For educational and research purposes.*
+        """)
 
-
-# ================== Application Entry Point ==================
+# ================== Main Entry Point ==================
 
 def main():
-    """Main entry point for the application."""
-    app = IntegratedLiteratureApp()
+    """Main application entry point."""
+    app = LiteratureSearchApp()
     app.run()
-
 
 if __name__ == "__main__":
     main()
