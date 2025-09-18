@@ -5,7 +5,7 @@ Version 3.0 - Enhanced with Comprehensive Analytics Features
 This application provides a sophisticated interface for searching academic literature
 with integrated analytics capabilities for research paper analysis and visualization.
 
-Author: Research Tools Development Team
+Author: Sourabh
 Date: September 2025
 License: Academic Use
 """
