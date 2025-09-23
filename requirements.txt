@@ -2,9 +2,6 @@ streamlit
 pandas
 numpy
 requests
-feedparser
-plotly
-arxiv
-beautifulsoup4
-lxml
-python-dateutil
+matplotlib
+scikit-learn
+wordcloud
