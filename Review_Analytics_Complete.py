@@ -1,1261 +1,921 @@
-"""
-Integrated Mechanical Engineering Literature Search and Analytics Application
-Version 5.0 - FIXED AND WORKING VERSION
-
-This version has been thoroughly tested and includes:
-- Proper error handling for all APIs
-- Fallback mechanisms for missing libraries
-- All 6 academic databases working
-- Same UI as requested
-- Real search results
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
-import json
+import requests
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+from sklearn.feature_extraction.text import TfidfVectorizer, ENGLISH_STOP_WORDS
+from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+import xml.etree.ElementTree as ET
 import re
-import time
-from collections import Counter, defaultdict
-from typing import List, Dict, Optional, Any
 import logging
+from typing import List, Dict, Optional
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ================== SAFE IMPORTS WITH FALLBACKS ==================
-
-# Core required imports
-try:
-    import requests
-    REQUESTS_AVAILABLE = True
-except ImportError:
-    REQUESTS_AVAILABLE = False
-    st.error("❌ CRITICAL: Install requests: `pip install requests`")
-
-# Try importing feedparser for ArXiv
-try:
-    import feedparser
-    FEEDPARSER_AVAILABLE = True
-except ImportError:
-    FEEDPARSER_AVAILABLE = False
-    logger.warning("feedparser not available - ArXiv will use alternative method")
-
-# Try importing XML parser
-try:
-    import xml.etree.ElementTree as ET
-    XML_AVAILABLE = True
-except ImportError:
-    XML_AVAILABLE = False
-    logger.warning("XML parsing not available")
-
-# Optional visualization
-try:
-    import plotly.graph_objects as go
-    import plotly.express as px
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    PLOTLY_AVAILABLE = False
-    logger.warning("Plotly not available - using Streamlit native charts")
-
-# Optional academic libraries
-try:
-    import arxiv
-    ARXIV_LIB_AVAILABLE = True
-except ImportError:
-    ARXIV_LIB_AVAILABLE = False
-
-try:
-    from scholarly import scholarly
-    SCHOLARLY_AVAILABLE = True
-except ImportError:
-    SCHOLARLY_AVAILABLE = False
-
-# ================== PAGE CONFIGURATION ==================
-
+# Configure Streamlit page
 st.set_page_config(
-    page_title="Academic Literature Search & Analytics",
-    page_icon="📚",
+    page_title="Literature Search & Analytics", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS - Same UI as before
-st.markdown("""
-<style>
-    .main-header {
-        padding: 2rem;
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-        color: white;
-        border-radius: 10px;
-        margin-bottom: 2rem;
-        text-align: center;
+# -----------------------------
+# Session State Initialization
+# -----------------------------
+def initialize_session_state():
+    """Initialize session state variables"""
+    if "papers" not in st.session_state:
+        st.session_state.papers = pd.DataFrame()
+    if "selected_papers" not in st.session_state:
+        st.session_state.selected_papers = pd.DataFrame()
+    if "semantic_key" not in st.session_state:
+        st.session_state.semantic_key = ""
+    if "search_history" not in st.session_state:
+        st.session_state.search_history = []
+
+# -----------------------------
+# Input Validation Functions
+# -----------------------------
+def validate_search_query(query: str) -> Optional[str]:
+    """Validate and sanitize search query"""
+    if not query or len(query.strip()) < 3:
+        st.error("Please enter a search query with at least 3 characters")
+        return None
+    
+    # Remove potentially problematic characters and sanitize
+    sanitized = re.sub(r'[<>\"\'&]', '', query.strip())
+    if len(sanitized) > 200:
+        st.warning("Query truncated to 200 characters for optimal performance")
+        sanitized = sanitized[:200]
+    
+    return sanitized
+
+def validate_dataframe(df: pd.DataFrame, required_columns: List[str]) -> bool:
+    """Validate dataframe structure"""
+    if df.empty:
+        return False
+    
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        logger.warning(f"Missing required columns: {missing_cols}")
+        return False
+    
+    return True
+
+# -----------------------------
+# Enhanced Search Functions
+# -----------------------------
+def search_crossref(query: str, rows: int = 20) -> List[Dict]:
+    """Search CrossRef database with enhanced error handling"""
+    url = f"https://api.crossref.org/works"
+    params = {
+        'query': query,
+        'rows': rows,
+        'select': 'title,author,issued,DOI,abstract'
     }
-    .search-result {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 8px;
-        margin-bottom: 1rem;
-        border-left: 4px solid #1e3c72;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        
+        items = response.json().get("message", {}).get("items", [])
+        results = []
+        
+        for item in items:
+            # Extract title safely
+            title = ""
+            if "title" in item and item["title"]:
+                title = item["title"][0] if isinstance(item["title"], list) else str(item["title"])
+            
+            # Extract authors safely
+            authors = ""
+            if "author" in item and item["author"]:
+                author_names = []
+                for author in item["author"]:
+                    family = author.get("family", "")
+                    given = author.get("given", "")
+                    if family or given:
+                        full_name = f"{given} {family}".strip()
+                        author_names.append(full_name)
+                authors = ", ".join(author_names)
+            
+            # Extract year safely
+            year = None
+            if "issued" in item and "date-parts" in item["issued"]:
+                date_parts = item["issued"]["date-parts"]
+                if date_parts and len(date_parts[0]) > 0:
+                    year = date_parts[0][0]
+            
+            results.append({
+                "title": title,
+                "authors": authors,
+                "year": year,
+                "doi": item.get("DOI", ""),
+                "abstract": item.get("abstract", ""),
+                "source": "CrossRef",
+            })
+        
+        return results
+        
+    except requests.exceptions.Timeout:
+        st.error("CrossRef search timed out. Please try again.")
+    except requests.exceptions.ConnectionError:
+        st.error("Connection error while searching CrossRef. Please check your internet connection.")
+    except requests.exceptions.HTTPError as e:
+        st.error(f"HTTP error occurred while searching CrossRef: {e}")
+    except Exception as e:
+        st.error(f"Unexpected error during CrossRef search: {str(e)}")
+        logger.error(f"CrossRef search error: {e}")
+    
+    return []
+
+def search_arxiv(query: str, max_results: int = 20) -> List[Dict]:
+    """Search arXiv database with enhanced error handling"""
+    # Sanitize query for arXiv API
+    clean_query = re.sub(r'[^\w\s\-\+\(\)]', '', query)
+    url = f"http://export.arxiv.org/api/query"
+    params = {
+        'search_query': f'all:{clean_query}',
+        'start': 0,
+        'max_results': max_results
     }
-    .stButton>button {
-        background-color: #1e3c72;
-        color: white;
+    
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        
+        root = ET.fromstring(response.content)
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
+        results = []
+        
+        for entry in root.findall('atom:entry', ns):
+            # Extract title
+            title_elem = entry.find('atom:title', ns)
+            title = title_elem.text.strip() if title_elem is not None else ""
+            
+            # Extract authors
+            author_elems = entry.findall('atom:author/atom:name', ns)
+            authors = ", ".join([a.text for a in author_elems if a.text])
+            
+            # Extract year from published date
+            published_elem = entry.find('atom:published', ns)
+            year = None
+            if published_elem is not None:
+                try:
+                    year = int(published_elem.text[:4])
+                except (ValueError, TypeError):
+                    year = None
+            
+            # Extract ID and abstract
+            id_elem = entry.find('atom:id', ns)
+            doi = id_elem.text if id_elem is not None else ""
+            
+            abstract_elem = entry.find('atom:summary', ns)
+            abstract = abstract_elem.text.strip() if abstract_elem is not None else ""
+            
+            results.append({
+                "title": title,
+                "authors": authors,
+                "year": year,
+                "doi": doi,
+                "abstract": abstract,
+                "source": "arXiv",
+            })
+        
+        return results
+        
+    except requests.exceptions.Timeout:
+        st.error("arXiv search timed out. Please try again.")
+    except requests.exceptions.ConnectionError:
+        st.error("Connection error while searching arXiv. Please check your internet connection.")
+    except ET.ParseError:
+        st.error("Error parsing arXiv response. Please try a different query.")
+    except Exception as e:
+        st.error(f"Unexpected error during arXiv search: {str(e)}")
+        logger.error(f"arXiv search error: {e}")
+    
+    return []
+
+def search_semantic_scholar(query: str, api_key: str = "", limit: int = 20) -> List[Dict]:
+    """Search Semantic Scholar database"""
+    if not api_key:
+        return []
+    
+    headers = {'x-api-key': api_key} if api_key else {}
+    url = "https://api.semanticscholar.org/graph/v1/paper/search"
+    params = {
+        'query': query, 
+        'limit': limit, 
+        'fields': 'title,authors,year,abstract,doi,publicationDate'
     }
-    .api-status-ok {
-        color: green;
-        font-weight: bold;
-    }
-    .api-status-error {
-        color: red;
-        font-weight: bold;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ================== DATA MODELS ==================
-
-class Paper:
-    """Paper data model."""
-    def __init__(self, title="", authors=None, year=0, abstract="", 
-                 journal="", doi="", url="", pdf_link="", source="", 
-                 citations=0, keywords=None):
-        self.title = title or ""
-        self.authors = authors or []
-        self.year = year or 0
-        self.abstract = abstract or ""
-        self.journal = journal or ""
-        self.doi = doi or ""
-        self.url = url or ""
-        self.pdf_link = pdf_link or ""
-        self.source = source or ""
-        self.citations = citations or 0
-        self.keywords = keywords or []
     
-    def to_dict(self):
-        return {
-            'title': self.title,
-            'authors': self.authors,
-            'year': self.year,
-            'abstract': self.abstract,
-            'journal': self.journal,
-            'doi': self.doi,
-            'url': self.url,
-            'pdf_link': self.pdf_link,
-            'source': self.source,
-            'citations': self.citations,
-            'keywords': self.keywords
-        }
-    
-    def to_bibtex(self):
-        """Convert to BibTeX format."""
-        authors_str = " and ".join(self.authors) if self.authors else "Unknown"
-        first_author = self.authors[0].split()[-1] if self.authors else "Unknown"
-        key = f"{first_author}{self.year}"
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+        response.raise_for_status()
         
-        return f"""@article{{{key},
-    title = {{{self.title}}},
-    author = {{{authors_str}}},
-    year = {{{self.year}}},
-    journal = {{{self.journal}}},
-    doi = {{{self.doi}}},
-    url = {{{self.url}}},
-    source = {{{self.source}}}
-}}"""
-
-# ================== WORKING API IMPLEMENTATIONS ==================
-
-class SemanticScholarAPI:
-    """Semantic Scholar API - WORKING."""
-    
-    @staticmethod
-    def search(query: str, limit: int = 10, year_filter: tuple = None) -> List[Paper]:
-        """Search Semantic Scholar."""
-        papers = []
-        
-        if not REQUESTS_AVAILABLE:
-            return papers
-        
-        try:
-            # API endpoint
-            url = "https://api.semanticscholar.org/graph/v1/paper/search"
-            
-            # Parameters
-            params = {
-                'query': query,
-                'limit': min(limit, 100),  # API limit
-                'fields': 'title,authors,year,abstract,venue,citationCount,url,openAccessPdf'
-            }
-            
-            # Add year filter if provided
-            if year_filter and len(year_filter) == 2:
-                params['year'] = f"{year_filter[0]}-{year_filter[1]}"
-            
-            # Make request
-            headers = {'User-Agent': 'Academic-Search-App/1.0'}
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                for item in data.get('data', []):
-                    # Extract authors
-                    authors = []
-                    for author in item.get('authors', []):
-                        if author and author.get('name'):
-                            authors.append(author['name'])
-                    
-                    # Create paper object
-                    paper = Paper(
-                        title=item.get('title', ''),
-                        authors=authors,
-                        year=item.get('year', 0),
-                        abstract=item.get('abstract', ''),
-                        journal=item.get('venue', ''),
-                        citations=item.get('citationCount', 0),
-                        url=item.get('url', ''),
-                        pdf_link=item.get('openAccessPdf', {}).get('url', '') if item.get('openAccessPdf') else '',
-                        source='Semantic Scholar'
-                    )
-                    
-                    if paper.title:  # Only add if has title
-                        papers.append(paper)
-            
-        except Exception as e:
-            logger.error(f"Semantic Scholar error: {e}")
-        
-        return papers
-
-class CrossRefAPI:
-    """CrossRef API - WORKING."""
-    
-    @staticmethod
-    def search(query: str, limit: int = 10, year_filter: tuple = None) -> List[Paper]:
-        """Search CrossRef."""
-        papers = []
-        
-        if not REQUESTS_AVAILABLE:
-            return papers
-        
-        try:
-            # API endpoint
-            url = "https://api.crossref.org/works"
-            
-            # Parameters
-            params = {
-                'query': query,
-                'rows': min(limit, 100)
-            }
-            
-            # Add year filter
-            if year_filter and len(year_filter) == 2:
-                params['filter'] = f"from-pub-date:{year_filter[0]},until-pub-date:{year_filter[1]}"
-            
-            # Make request
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                for item in data.get('message', {}).get('items', []):
-                    # Extract authors
-                    authors = []
-                    for author in item.get('author', []):
-                        name = f"{author.get('given', '')} {author.get('family', '')}".strip()
-                        if name:
-                            authors.append(name)
-                    
-                    # Extract year
-                    year = 0
-                    if 'published-print' in item:
-                        date_parts = item['published-print'].get('date-parts', [[]])
-                        if date_parts and date_parts[0]:
-                            year = date_parts[0][0] if date_parts[0] else 0
-                    elif 'published-online' in item:
-                        date_parts = item['published-online'].get('date-parts', [[]])
-                        if date_parts and date_parts[0]:
-                            year = date_parts[0][0] if date_parts[0] else 0
-                    
-                    # Get title
-                    title = ' '.join(item.get('title', [''])) if item.get('title') else ''
-                    
-                    # Create paper
-                    paper = Paper(
-                        title=title,
-                        authors=authors,
-                        year=year,
-                        abstract=item.get('abstract', ''),
-                        journal=' '.join(item.get('container-title', [''])),
-                        doi=item.get('DOI', ''),
-                        citations=item.get('is-referenced-by-count', 0),
-                        url=item.get('URL', ''),
-                        source='CrossRef'
-                    )
-                    
-                    if paper.title:
-                        papers.append(paper)
-            
-        except Exception as e:
-            logger.error(f"CrossRef error: {e}")
-        
-        return papers
-
-class ArXivAPI:
-    """ArXiv API - WORKING with multiple fallbacks."""
-    
-    @staticmethod
-    def search(query: str, limit: int = 10, year_filter: tuple = None) -> List[Paper]:
-        """Search arXiv with fallback methods."""
-        papers = []
-        
-        # Method 1: Try using arxiv library if available
-        if ARXIV_LIB_AVAILABLE:
-            try:
-                search = arxiv.Search(
-                    query=query,
-                    max_results=limit,
-                    sort_by=arxiv.SortCriterion.Relevance
-                )
-                
-                for result in search.results():
-                    # Apply year filter
-                    if year_filter:
-                        if result.published.year < year_filter[0] or result.published.year > year_filter[1]:
-                            continue
-                    
-                    paper = Paper(
-                        title=result.title,
-                        authors=[author.name for author in result.authors],
-                        year=result.published.year,
-                        abstract=result.summary,
-                        journal="arXiv",
-                        url=result.entry_id,
-                        pdf_link=result.pdf_url,
-                        source='arXiv'
-                    )
-                    papers.append(paper)
-                
-                return papers
-                
-            except Exception as e:
-                logger.warning(f"ArXiv library failed: {e}, trying HTTP API")
-        
-        # Method 2: Use feedparser if available
-        if FEEDPARSER_AVAILABLE and REQUESTS_AVAILABLE:
-            try:
-                url = "http://export.arxiv.org/api/query"
-                params = {
-                    'search_query': query,
-                    'start': 0,
-                    'max_results': limit
-                }
-                
-                response = requests.get(url, params=params, timeout=10)
-                
-                if response.status_code == 200:
-                    feed = feedparser.parse(response.text)
-                    
-                    for entry in feed.entries:
-                        # Extract year
-                        year = int(entry.published[:4]) if 'published' in entry else 0
-                        
-                        # Apply year filter
-                        if year_filter:
-                            if year < year_filter[0] or year > year_filter[1]:
-                                continue
-                        
-                        # Extract authors
-                        authors = []
-                        for author in entry.get('authors', []):
-                            if hasattr(author, 'name'):
-                                authors.append(author.name)
-                            elif isinstance(author, dict) and 'name' in author:
-                                authors.append(author['name'])
-                        
-                        paper = Paper(
-                            title=entry.title.replace('\n', ' '),
-                            authors=authors,
-                            year=year,
-                            abstract=entry.summary,
-                            journal="arXiv",
-                            url=entry.link,
-                            pdf_link=entry.link.replace('abs', 'pdf') if 'abs' in entry.link else entry.link,
-                            source='arXiv'
-                        )
-                        papers.append(paper)
-                
-                return papers
-                
-            except Exception as e:
-                logger.warning(f"Feedparser method failed: {e}")
-        
-        # Method 3: Direct XML parsing (last resort)
-        if REQUESTS_AVAILABLE:
-            try:
-                url = "http://export.arxiv.org/api/query"
-                params = {
-                    'search_query': query,
-                    'start': 0,
-                    'max_results': limit
-                }
-                
-                response = requests.get(url, params=params, timeout=10)
-                
-                if response.status_code == 200:
-                    # Basic XML parsing without feedparser
-                    text = response.text
-                    
-                    # Extract entries using regex (basic approach)
-                    entries = re.findall(r'<entry>(.*?)</entry>', text, re.DOTALL)
-                    
-                    for entry_text in entries[:limit]:
-                        # Extract title
-                        title_match = re.search(r'<title>(.*?)</title>', entry_text)
-                        title = title_match.group(1) if title_match else ''
-                        
-                        # Extract summary
-                        summary_match = re.search(r'<summary>(.*?)</summary>', entry_text)
-                        abstract = summary_match.group(1) if summary_match else ''
-                        
-                        # Extract link
-                        link_match = re.search(r'<id>(.*?)</id>', entry_text)
-                        url = link_match.group(1) if link_match else ''
-                        
-                        # Extract published date
-                        published_match = re.search(r'<published>(\d{4})', entry_text)
-                        year = int(published_match.group(1)) if published_match else 0
-                        
-                        # Extract authors
-                        author_matches = re.findall(r'<name>(.*?)</name>', entry_text)
-                        authors = author_matches if author_matches else []
-                        
-                        paper = Paper(
-                            title=title.replace('\n', ' ').strip(),
-                            authors=authors,
-                            year=year,
-                            abstract=abstract[:500],
-                            journal="arXiv",
-                            url=url,
-                            pdf_link=url.replace('abs', 'pdf') if url else '',
-                            source='arXiv'
-                        )
-                        
-                        if paper.title:
-                            papers.append(paper)
-                
-            except Exception as e:
-                logger.error(f"ArXiv fallback failed: {e}")
-        
-        return papers
-
-class PubMedAPI:
-    """PubMed API - WORKING."""
-    
-    @staticmethod
-    def search(query: str, limit: int = 10, year_filter: tuple = None) -> List[Paper]:
-        """Search PubMed."""
-        papers = []
-        
-        if not REQUESTS_AVAILABLE:
-            return papers
-        
-        try:
-            # Step 1: Search for IDs
-            search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-            
-            # Enhanced query for mechanical engineering
-            enhanced_query = f"({query}) AND (engineering OR mechanical OR robotics OR biomechanics)"
-            
-            search_params = {
-                'db': 'pubmed',
-                'term': enhanced_query,
-                'retmax': limit,
-                'retmode': 'json'
-            }
-            
-            if year_filter:
-                search_params['mindate'] = f"{year_filter[0]}/01/01"
-                search_params['maxdate'] = f"{year_filter[1]}/12/31"
-                search_params['datetype'] = 'pdat'
-            
-            response = requests.get(search_url, params=search_params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                id_list = data.get('esearchresult', {}).get('idlist', [])
-                
-                if id_list:
-                    # Step 2: Fetch details
-                    fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-                    fetch_params = {
-                        'db': 'pubmed',
-                        'id': ','.join(id_list),
-                        'retmode': 'xml'
-                    }
-                    
-                    fetch_response = requests.get(fetch_url, params=fetch_params, timeout=10)
-                    
-                    if fetch_response.status_code == 200 and XML_AVAILABLE:
-                        root = ET.fromstring(fetch_response.text)
-                        
-                        for article in root.findall('.//PubmedArticle'):
-                            # Extract data
-                            title_elem = article.find('.//ArticleTitle')
-                            title = title_elem.text if title_elem is not None else ''
-                            
-                            # Authors
-                            authors = []
-                            for author in article.findall('.//Author'):
-                                lastname = author.find('LastName')
-                                forename = author.find('ForeName')
-                                if lastname is not None and forename is not None:
-                                    authors.append(f"{forename.text} {lastname.text}")
-                            
-                            # Year
-                            year_elem = article.find('.//PubDate/Year')
-                            year = int(year_elem.text) if year_elem is not None else 0
-                            
-                            # Abstract
-                            abstract_texts = []
-                            for abstract in article.findall('.//AbstractText'):
-                                if abstract.text:
-                                    abstract_texts.append(abstract.text)
-                            abstract = ' '.join(abstract_texts)
-                            
-                            # Journal
-                            journal_elem = article.find('.//Journal/Title')
-                            journal = journal_elem.text if journal_elem is not None else ''
-                            
-                            # PMID
-                            pmid_elem = article.find('.//PMID')
-                            pmid = pmid_elem.text if pmid_elem is not None else ''
-                            
-                            paper = Paper(
-                                title=title,
-                                authors=authors,
-                                year=year,
-                                abstract=abstract[:500],
-                                journal=journal,
-                                url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                                source='PubMed'
-                            )
-                            
-                            if paper.title:
-                                papers.append(paper)
-            
-        except Exception as e:
-            logger.error(f"PubMed error: {e}")
-        
-        return papers
-
-class DOAJApi:
-    """DOAJ API - WORKING."""
-    
-    @staticmethod
-    def search(query: str, limit: int = 10, year_filter: tuple = None) -> List[Paper]:
-        """Search DOAJ."""
-        papers = []
-        
-        if not REQUESTS_AVAILABLE:
-            return papers
-        
-        try:
-            url = "https://doaj.org/api/v2/search/articles"
-            
-            params = {
-                'query': query,
-                'pageSize': min(limit, 100)
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                for item in data.get('results', []):
-                    article = item.get('bibjson', {})
-                    
-                    # Year
-                    year = article.get('year', 0)
-                    if isinstance(year, str):
-                        try:
-                            year = int(year)
-                        except:
-                            year = 0
-                    
-                    # Apply year filter
-                    if year_filter and year:
-                        if year < year_filter[0] or year > year_filter[1]:
-                            continue
-                    
-                    # Authors
-                    authors = []
-                    for author in article.get('author', []):
-                        if author.get('name'):
-                            authors.append(author['name'])
-                    
-                    # URL
-                    url = ''
-                    for link in article.get('link', []):
-                        if link.get('type') == 'fulltext':
-                            url = link.get('url', '')
-                            break
-                    
-                    paper = Paper(
-                        title=article.get('title', ''),
-                        authors=authors,
-                        year=year,
-                        abstract=article.get('abstract', ''),
-                        journal=article.get('journal', {}).get('title', ''),
-                        url=url,
-                        source='DOAJ',
-                        keywords=article.get('keywords', [])
-                    )
-                    
-                    if paper.title:
-                        papers.append(paper)
-            
-        except Exception as e:
-            logger.error(f"DOAJ error: {e}")
-        
-        return papers
-
-class GoogleScholarAPI:
-    """Google Scholar - Limited functionality."""
-    
-    @staticmethod
-    def search(query: str, limit: int = 5, year_filter: tuple = None) -> List[Paper]:
-        """Search Google Scholar (often blocked)."""
-        papers = []
-        
-        if SCHOLARLY_AVAILABLE:
-            try:
-                from scholarly import scholarly
-                
-                search_query = scholarly.search_pubs(query)
-                count = 0
-                
-                for result in search_query:
-                    if count >= limit:
-                        break
-                    
-                    paper = Paper(
-                        title=result.get('bib', {}).get('title', ''),
-                        authors=result.get('bib', {}).get('author', []),
-                        year=int(result.get('bib', {}).get('pub_year', 0)) if result.get('bib', {}).get('pub_year') else 0,
-                        abstract=result.get('bib', {}).get('abstract', ''),
-                        journal=result.get('bib', {}).get('venue', ''),
-                        citations=result.get('num_citations', 0),
-                        url=result.get('pub_url', ''),
-                        source='Google Scholar'
-                    )
-                    
-                    if paper.title:
-                        papers.append(paper)
-                        count += 1
-                    
-                    time.sleep(1)  # Rate limiting
-                    
-            except Exception as e:
-                logger.warning(f"Google Scholar blocked or error: {e}")
-        
-        return papers
-
-# ================== MULTI-SOURCE SEARCH ENGINE ==================
-
-class MultiSourceSearchEngine:
-    """Search engine that queries all databases."""
-    
-    def __init__(self):
-        self.apis = {
-            'Semantic Scholar': SemanticScholarAPI(),
-            'CrossRef': CrossRefAPI(),
-            'arXiv': ArXivAPI(),
-            'PubMed': PubMedAPI(),
-            'DOAJ': DOAJApi(),
-            'Google Scholar': GoogleScholarAPI()
-        }
-        self.api_status = {}
-    
-    def search(self, query: str, sources: List[str] = None, 
-              limit_per_source: int = 10, year_filter: tuple = None) -> List[Paper]:
-        """Search multiple databases."""
-        
-        if not sources:
-            sources = list(self.apis.keys())
-        
-        all_papers = []
-        source_results = {}
-        
-        # Progress tracking
-        total_sources = len(sources)
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for idx, source in enumerate(sources):
-            if source not in self.apis:
-                continue
-            
-            status_text.text(f"🔍 Searching {source}... ({idx+1}/{total_sources})")
-            progress_bar.progress((idx + 1) / total_sources)
-            
-            try:
-                # Search the API
-                papers = self.apis[source].search(query, limit_per_source, year_filter)
-                all_papers.extend(papers)
-                source_results[source] = len(papers)
-                self.api_status[source] = True
-                
-            except Exception as e:
-                logger.error(f"Error with {source}: {e}")
-                source_results[source] = 0
-                self.api_status[source] = False
-        
-        # Clear progress
-        progress_bar.empty()
-        status_text.empty()
-        
-        # Show results summary
-        with st.expander("📊 Search Summary", expanded=True):
-            cols = st.columns(len(source_results))
-            for idx, (source, count) in enumerate(source_results.items()):
-                with cols[idx]:
-                    status = "✅" if self.api_status.get(source, False) else "❌"
-                    st.metric(source, f"{count} papers", f"{status}")
-        
-        # Remove duplicates
-        unique_papers = self._remove_duplicates(all_papers)
-        
-        return unique_papers
-    
-    def _remove_duplicates(self, papers: List[Paper]) -> List[Paper]:
-        """Remove duplicate papers based on title similarity."""
-        seen_titles = set()
-        unique_papers = []
+        papers = response.json().get('data', [])
+        results = []
         
         for paper in papers:
-            # Normalize title
-            normalized = re.sub(r'[^\w\s]', '', paper.title.lower())
-            normalized = ' '.join(normalized.split())
+            # Extract authors
+            authors = ""
+            if paper.get('authors'):
+                author_names = [author.get('name', '') for author in paper['authors']]
+                authors = ", ".join(filter(None, author_names))
             
-            if normalized and normalized not in seen_titles:
-                unique_papers.append(paper)
-                seen_titles.add(normalized)
-        
-        return unique_papers
-
-# ================== ANALYTICS MODULE ==================
-
-class ResearchAnalytics:
-    """Analytics for research papers."""
-    
-    def __init__(self, papers: List[Paper]):
-        self.papers = papers
-        self.df = self._create_dataframe()
-    
-    def _create_dataframe(self):
-        """Create DataFrame from papers."""
-        data = []
-        for p in self.papers:
-            data.append({
-                'title': p.title,
-                'year': p.year,
-                'citations': p.citations,
-                'source': p.source,
-                'num_authors': len(p.authors),
-                'has_pdf': bool(p.pdf_link),
-                'journal': p.journal
+            results.append({
+                "title": paper.get('title', ''),
+                "authors": authors,
+                "year": paper.get('year'),
+                "doi": paper.get('doi', ''),
+                "abstract": paper.get('abstract', ''),
+                "source": "Semantic Scholar"
             })
-        return pd.DataFrame(data)
-    
-    def get_summary_stats(self):
-        """Get summary statistics."""
-        if self.df.empty:
-            return {}
         
-        return {
-            'total_papers': len(self.papers),
-            'unique_sources': self.df['source'].nunique(),
-            'total_citations': int(self.df['citations'].sum()),
-            'avg_citations': float(self.df['citations'].mean()),
-            'papers_with_pdf': int(self.df['has_pdf'].sum()),
-            'year_range': f"{int(self.df['year'].min())}-{int(self.df['year'].max())}"
-        }
-    
-    def get_source_distribution(self):
-        """Get distribution by source."""
-        return self.df['source'].value_counts()
-    
-    def get_year_distribution(self):
-        """Get distribution by year."""
-        return self.df[self.df['year'] > 0]['year'].value_counts().sort_index()
-
-# ================== MAIN APPLICATION ==================
-
-def main():
-    """Main application."""
-    
-    # Initialize session state
-    if 'search_results' not in st.session_state:
-        st.session_state.search_results = []
-    if 'selected_papers' not in st.session_state:
-        st.session_state.selected_papers = []
-    
-    # Header
-    st.markdown("""
-    <div class="main-header">
-        <h1>📚 Academic Literature Search & Analytics Platform</h1>
-        <p>Multi-Database Search with Real-Time Results from 6 Academic Databases</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Sidebar navigation
-    with st.sidebar:
-        st.title("🗂️ Navigation")
-        page = st.radio(
-            "Select Page",
-            ["🔍 Search", "📊 Analytics", "📁 Portfolio", "⚙️ Settings"],
-            index=0
-        )
-    
-    # Page routing
-    if page == "🔍 Search":
-        render_search_page()
-    elif page == "📊 Analytics":
-        render_analytics_page()
-    elif page == "📁 Portfolio":
-        render_portfolio_page()
-    else:
-        render_settings_page()
-
-def render_search_page():
-    """Render search page."""
-    st.header("🔍 Multi-Database Literature Search")
-    
-    # Search interface
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        query = st.text_input(
-            "Enter your search query",
-            placeholder="e.g., 'deep learning mechanical fault detection'",
-            help="Search across 6 academic databases simultaneously"
-        )
-    
-    with col2:
-        st.write("")  # Spacing
-        st.write("")  # Spacing
-        search_button = st.button("🔍 Search", type="primary", use_container_width=True)
-    
-    # Search settings
-    with st.expander("⚙️ Search Settings", expanded=True):
-        col1, col2, col3 = st.columns(3)
+        return results
         
-        with col1:
-            st.write("**📚 Select Databases:**")
-            sources = []
-            
-            if st.checkbox("Semantic Scholar", value=True, key="ss"):
-                sources.append("Semantic Scholar")
-            if st.checkbox("CrossRef", value=True, key="cr"):
-                sources.append("CrossRef")
-            if st.checkbox("arXiv", value=True, key="ax"):
-                sources.append("arXiv")
-            if st.checkbox("PubMed", value=True, key="pm"):
-                sources.append("PubMed")
-            if st.checkbox("DOAJ (Open Access)", value=True, key="dj"):
-                sources.append("DOAJ")
-            if st.checkbox("Google Scholar", value=False, key="gs"):
-                sources.append("Google Scholar")
-        
-        with col2:
-            st.write("**🔧 Filters:**")
-            year_range = st.slider(
-                "Publication Year Range",
-                1990, 2024, (2020, 2024),
-                key="year_range"
-            )
-            
-            results_per_db = st.number_input(
-                "Results per Database",
-                min_value=5,
-                max_value=50,
-                value=10,
-                key="results_count"
-            )
-        
-        with col3:
-            st.write("**📈 Display Options:**")
-            sort_by = st.selectbox(
-                "Sort Results By",
-                ["Relevance", "Citations", "Year (Newest)", "Year (Oldest)"],
-                key="sort_by"
-            )
-            
-            show_abstract = st.checkbox("Show Abstracts", value=True, key="show_abs")
-    
-    # Execute search
-    if search_button and query:
-        if not sources:
-            st.warning("⚠️ Please select at least one database to search.")
+    except requests.exceptions.Timeout:
+        st.error("Semantic Scholar search timed out. Please try again.")
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 401:
+            st.error("Invalid Semantic Scholar API key. Please check your key.")
         else:
-            with st.spinner(f"🔍 Searching {len(sources)} databases for '{query}'..."):
-                # Initialize search engine
-                search_engine = MultiSourceSearchEngine()
-                
-                # Perform search
-                results = search_engine.search(
-                    query=query,
-                    sources=sources,
-                    limit_per_source=results_per_db,
-                    year_filter=year_range
-                )
-                
-                # Sort results
-                if sort_by == "Citations":
-                    results.sort(key=lambda p: p.citations, reverse=True)
-                elif sort_by == "Year (Newest)":
-                    results.sort(key=lambda p: p.year, reverse=True)
-                elif sort_by == "Year (Oldest)":
-                    results.sort(key=lambda p: p.year)
-                
-                # Store results
-                st.session_state.search_results = results
-                
-                # Success message
-                st.success(f"✅ Found {len(results)} unique papers from {len(sources)} databases!")
+            st.error(f"Semantic Scholar API error: {e}")
+    except Exception as e:
+        st.error(f"Unexpected error during Semantic Scholar search: {str(e)}")
+        logger.error(f"Semantic Scholar search error: {e}")
     
-    # Display results
-    if st.session_state.search_results:
-        st.divider()
-        st.subheader(f"📄 Search Results ({len(st.session_state.search_results)} papers)")
-        
-        # Filter by source
-        all_sources = list(set([p.source for p in st.session_state.search_results]))
-        filter_source = st.selectbox(
-            "Filter by Source",
-            ["All Sources"] + sorted(all_sources),
-            key="filter_source"
+    return []
+
+def merge_results(*args) -> pd.DataFrame:
+    """Merge search results from multiple sources with deduplication"""
+    all_results = [result for result_list in args for result in result_list]
+    
+    if not all_results:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(all_results)
+    
+    # Clean and deduplicate
+    df['title'] = df['title'].fillna('').astype(str)
+    df['year'] = pd.to_numeric(df['year'], errors='coerce')
+    
+    # Deduplicate by title (case-insensitive)
+    df['title_lower'] = df['title'].str.lower().str.strip()
+    df = df.drop_duplicates(subset=['title_lower'], keep='first')
+    df = df.drop(columns=['title_lower'])
+    
+    # Sort by year (most recent first)
+    df = df.sort_values('year', ascending=False, na_last=True)
+    
+    return df.reset_index(drop=True)
+
+# -----------------------------
+# Enhanced Analytics Functions
+# -----------------------------
+def plot_keyword_frequency(df: pd.DataFrame) -> None:
+    """Generate keyword frequency analysis with improved text processing"""
+    if not validate_dataframe(df, ['abstract']):
+        st.info("No data available for keyword analysis")
+        return
+    
+    abstracts = df["abstract"].fillna("").astype(str)
+    valid_abstracts = [abs_text for abs_text in abstracts if abs_text.strip()]
+    
+    if not valid_abstracts:
+        st.info("No abstracts available for keyword analysis")
+        return
+    
+    # Enhanced text processing
+    text = " ".join(valid_abstracts)
+    # Remove special characters and normalize
+    text = re.sub(r'[^\w\s]', ' ', text.lower())
+    words = text.split()
+    
+    # Filter out stop words and short words
+    filtered_words = [
+        word for word in words 
+        if word not in ENGLISH_STOP_WORDS 
+        and len(word) > 2 
+        and word.isalpha()
+    ]
+    
+    if not filtered_words:
+        st.info("No meaningful keywords found after filtering")
+        return
+    
+    word_freq = pd.Series(filtered_words).value_counts().head(20)
+    
+    # Create bar plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+    word_freq.plot(kind='bar', ax=ax, color='steelblue')
+    ax.set_title("Top 20 Keywords in Abstracts", fontsize=14, fontweight='bold')
+    ax.set_xlabel("Keywords", fontsize=12)
+    ax.set_ylabel("Frequency", fontsize=12)
+    ax.tick_params(axis='x', rotation=45)
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)  # Prevent memory leaks
+    
+    # Create word cloud
+    if len(filtered_words) > 10:  # Only create if enough words
+        try:
+            wordcloud = WordCloud(
+                width=800, 
+                height=400, 
+                background_color='white',
+                max_words=100,
+                colormap='viridis'
+            ).generate(" ".join(filtered_words))
+            
+            fig_wc, ax_wc = plt.subplots(figsize=(12, 6))
+            ax_wc.imshow(wordcloud, interpolation='bilinear')
+            ax_wc.axis('off')
+            ax_wc.set_title("Word Cloud of Keywords", fontsize=14, fontweight='bold')
+            st.pyplot(fig_wc)
+            plt.close(fig_wc)
+        except Exception as e:
+            st.warning(f"Could not generate word cloud: {str(e)}")
+
+def plot_publication_trend(df: pd.DataFrame) -> None:
+    """Plot publication trends with enhanced data handling"""
+    if not validate_dataframe(df, ['year']):
+        st.info("No data available for publication trend analysis")
+        return
+    
+    # Clean and filter years
+    years = pd.to_numeric(df['year'], errors='coerce').dropna()
+    current_year = pd.Timestamp.now().year
+    valid_years = years[(years >= 1950) & (years <= current_year)]
+    
+    if valid_years.empty:
+        st.info("No valid publication years found for trend analysis")
+        return
+    
+    trend = valid_years.value_counts().sort_index()
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    trend.plot(kind='line', ax=ax, marker='o', linewidth=2, markersize=4, color='darkgreen')
+    ax.set_title("Publication Trend Over Time", fontsize=14, fontweight='bold')
+    ax.set_xlabel("Year", fontsize=12)
+    ax.set_ylabel("Number of Publications", fontsize=12)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+    
+    # Display summary statistics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Papers", len(valid_years))
+    with col2:
+        st.metric("Year Range", f"{int(valid_years.min())}-{int(valid_years.max())}")
+    with col3:
+        st.metric("Peak Year", f"{int(trend.idxmax())} ({trend.max()} papers)")
+
+def plot_topic_clusters(df: pd.DataFrame) -> None:
+    """Perform topic clustering with enhanced algorithm"""
+    if not validate_dataframe(df, ['abstract', 'title']):
+        st.info("No data available for clustering analysis")
+        return
+    
+    valid_abstracts = df['abstract'].fillna("").astype(str)
+    valid_data = valid_abstracts[valid_abstracts.str.strip() != ""]
+    
+    if len(valid_data) < 3:
+        st.info("Insufficient data for clustering analysis (minimum 3 abstracts required)")
+        return
+    
+    try:
+        # Enhanced vectorization
+        vectorizer = TfidfVectorizer(
+            stop_words='english',
+            max_features=500,
+            min_df=1,
+            max_df=0.95,
+            ngram_range=(1, 2)
         )
         
-        # Display each paper
-        papers_to_show = st.session_state.search_results
-        if filter_source != "All Sources":
-            papers_to_show = [p for p in papers_to_show if p.source == filter_source]
+        X = vectorizer.fit_transform(valid_data)
         
-        for idx, paper in enumerate(papers_to_show[:50], 1):  # Limit display to 50
-            with st.container():
-                st.markdown('<div class="search-result">', unsafe_allow_html=True)
-                
-                col1, col2 = st.columns([5, 1])
-                
-                with col1:
-                    # Title and basic info
-                    st.markdown(f"### {idx}. {paper.title}")
-                    
-                    # Authors
-                    if paper.authors:
-                        authors_display = ', '.join(paper.authors[:5])
-                        if len(paper.authors) > 5:
-                            authors_display += f" ... (+{len(paper.authors)-5} more)"
-                        st.write(f"**Authors:** {authors_display}")
-                    
-                    # Metadata in columns
-                    meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
-                    with meta_col1:
-                        st.caption(f"📅 Year: {paper.year if paper.year else 'N/A'}")
-                    with meta_col2:
-                        st.caption(f"📖 Citations: {paper.citations}")
-                    with meta_col3:
-                        st.caption(f"🗃️ Source: {paper.source}")
-                    with meta_col4:
-                        st.caption(f"📰 {paper.journal[:30] if paper.journal else 'N/A'}")
-                    
-                    # Links
-                    links = []
-                    if paper.url:
-                        links.append(f"[🔗 View Paper]({paper.url})")
-                    if paper.pdf_link:
-                        links.append(f"[📄 PDF]({paper.pdf_link})")
-                    if paper.doi:
-                        links.append(f"[DOI]({f'https://doi.org/{paper.doi}'})")
-                    
-                    if links:
-                        st.markdown(" | ".join(links))
-                    
-                    # Abstract (if enabled)
-                    if show_abstract and paper.abstract:
-                        with st.expander("📝 View Abstract"):
-                            st.write(paper.abstract)
-                
-                with col2:
-                    # Action buttons
-                    st.write("")  # Spacing
-                    
-                    if st.button("➕ Add to Portfolio", key=f"add_{idx}"):
-                        if paper not in st.session_state.selected_papers:
-                            st.session_state.selected_papers.append(paper)
-                            st.success("Added!")
-                    
-                    if st.button("📋 BibTeX", key=f"bib_{idx}"):
-                        st.code(paper.to_bibtex(), language="bibtex")
-                
-                st.markdown('</div>', unsafe_allow_html=True)
+        if X.shape[0] < 3:
+            st.info("Insufficient unique content for clustering")
+            return
         
-        # Export options
-        st.divider()
+        # Determine optimal number of clusters
+        n_samples = X.shape[0]
+        n_clusters = min(5, max(2, n_samples // 3))
+        
+        # Perform clustering
+        kmeans = KMeans(
+            n_clusters=n_clusters,
+            random_state=42,
+            n_init=10,
+            max_iter=300
+        )
+        
+        labels = kmeans.fit_predict(X)
+        
+        # Create results dataframe
+        cluster_df = pd.DataFrame({
+            'cluster': labels,
+            'title': df.loc[valid_data.index, 'title'].fillna("Untitled"),
+            'abstract_preview': valid_data.str[:100] + "..."
+        })
+        
+        st.subheader("Topic Clustering Results")
+        
+        # Display cluster distribution
+        cluster_counts = pd.Series(labels).value_counts().sort_index()
+        
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("📥 Export All Results (JSON)"):
-                data = [p.to_dict() for p in st.session_state.search_results]
-                json_str = json.dumps(data, indent=2)
-                st.download_button(
-                    label="Download JSON",
-                    data=json_str,
-                    file_name=f"search_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json"
-                )
+            fig, ax = plt.subplots(figsize=(8, 5))
+            cluster_counts.plot(kind='bar', ax=ax, color='coral')
+            ax.set_title("Papers per Cluster", fontsize=12, fontweight='bold')
+            ax.set_xlabel("Cluster ID")
+            ax.set_ylabel("Number of Papers")
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
         
         with col2:
-            if st.button("📥 Export All Results (CSV)"):
-                df = pd.DataFrame([p.to_dict() for p in st.session_state.search_results])
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="Download CSV",
-                    data=csv,
-                    file_name=f"search_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-
-def render_analytics_page():
-    """Render analytics page."""
-    st.header("📊 Research Analytics Dashboard")
-    
-    if not st.session_state.selected_papers:
-        st.info("📌 Please add papers to your portfolio from the search page to view analytics.")
+            st.write("**Cluster Distribution:**")
+            for cluster_id, count in cluster_counts.items():
+                st.write(f"Cluster {cluster_id}: {count} papers")
         
-        if st.button("Use Search Results for Demo"):
-            if st.session_state.search_results:
-                st.session_state.selected_papers = st.session_state.search_results[:30]
-                st.rerun()
-        return
-    
-    # Initialize analytics
-    analytics = ResearchAnalytics(st.session_state.selected_papers)
-    stats = analytics.get_summary_stats()
-    
-    # Summary metrics
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    
-    with col1:
-        st.metric("Total Papers", stats.get('total_papers', 0))
-    with col2:
-        st.metric("Sources", stats.get('unique_sources', 0))
-    with col3:
-        st.metric("Total Citations", f"{stats.get('total_citations', 0):,}")
-    with col4:
-        st.metric("Avg Citations", f"{stats.get('avg_citations', 0):.1f}")
-    with col5:
-        st.metric("With PDF", stats.get('papers_with_pdf', 0))
-    with col6:
-        st.metric("Year Range", stats.get('year_range', 'N/A'))
-    
-    st.divider()
-    
-    # Visualizations
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("📚 Papers by Source")
-        source_dist = analytics.get_source_distribution()
-        if not source_dist.empty:
-            if PLOTLY_AVAILABLE:
-                fig = go.Figure(data=[
-                    go.Pie(labels=source_dist.index, values=source_dist.values, hole=0.3)
-                ])
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.bar_chart(source_dist)
-    
-    with col2:
-        st.subheader("📅 Papers by Year")
-        year_dist = analytics.get_year_distribution()
-        if not year_dist.empty:
-            if PLOTLY_AVAILABLE:
-                fig = go.Figure(data=[
-                    go.Bar(x=year_dist.index, y=year_dist.values, marker_color='#1e3c72')
-                ])
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.line_chart(year_dist)
-    
-    # Top cited papers
-    st.divider()
-    st.subheader("🏆 Top 10 Most Cited Papers")
-    
-    top_papers = sorted(st.session_state.selected_papers, 
-                       key=lambda p: p.citations, reverse=True)[:10]
-    
-    for i, paper in enumerate(top_papers, 1):
-        with st.expander(f"{i}. {paper.title[:100]}... ({paper.citations} citations)"):
-            st.write(f"**Authors:** {', '.join(paper.authors[:3])}")
-            st.write(f"**Year:** {paper.year} | **Source:** {paper.source}")
-            if paper.journal:
-                st.write(f"**Journal:** {paper.journal}")
-            if paper.abstract:
-                st.write(f"**Abstract:** {paper.abstract[:300]}...")
+        # Display papers by cluster
+        st.subheader("Papers by Cluster")
+        for cluster_id in sorted(cluster_counts.index):
+            cluster_papers = cluster_df[cluster_df['cluster'] == cluster_id]
+            with st.expander(f"Cluster {cluster_id} ({len(cluster_papers)} papers)"):
+                st.dataframe(
+                    cluster_papers[['title', 'abstract_preview']],
+                    use_container_width=True
+                )
+        
+    except Exception as e:
+        st.error(f"Clustering analysis failed: {str(e)}")
+        logger.error(f"Clustering error: {e}")
 
-def render_portfolio_page():
-    """Render portfolio page."""
-    st.header("📁 Research Portfolio")
-    
-    if not st.session_state.selected_papers:
-        st.info("📌 Your portfolio is empty. Add papers from the search page.")
+def plot_similarity_heatmap(df: pd.DataFrame) -> None:
+    """Generate similarity heatmap with enhanced visualization"""
+    if not validate_dataframe(df, ['abstract']):
+        st.info("No data available for similarity analysis")
         return
     
-    st.write(f"**Portfolio contains {len(st.session_state.selected_papers)} papers**")
+    valid_abstracts = df['abstract'].fillna("").astype(str)
+    valid_data = valid_abstracts[valid_abstracts.str.strip() != ""]
     
-    # Export options
+    if len(valid_data) < 2:
+        st.info("Insufficient data for similarity analysis (minimum 2 abstracts required)")
+        return
+    
+    if len(valid_data) > 20:
+        st.warning("Large dataset detected. Showing similarity for first 20 papers only.")
+        valid_data = valid_data.head(20)
+    
+    try:
+        vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
+        X = vectorizer.fit_transform(valid_data)
+        similarity_matrix = cosine_similarity(X)
+        
+        fig, ax = plt.subplots(figsize=(10, 8))
+        im = ax.imshow(similarity_matrix, cmap='viridis', vmin=0, vmax=1)
+        ax.set_title("Document Similarity Heatmap", fontsize=14, fontweight='bold')
+        ax.set_xlabel("Document Index")
+        ax.set_ylabel("Document Index")
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Cosine Similarity', rotation=270, labelpad=15)
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+        
+        # Display similarity statistics
+        upper_triangle = similarity_matrix[np.triu_indices_from(similarity_matrix, k=1)]
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Average Similarity", f"{np.mean(upper_triangle):.3f}")
+        with col2:
+            st.metric("Max Similarity", f"{np.max(upper_triangle):.3f}")
+        with col3:
+            st.metric("Min Similarity", f"{np.min(upper_triangle):.3f}")
+        
+    except Exception as e:
+        st.error(f"Similarity analysis failed: {str(e)}")
+        logger.error(f"Similarity analysis error: {e}")
+
+# -----------------------------
+# Enhanced Export Functions
+# -----------------------------
+def export_selected_papers() -> None:
+    """Enhanced export functionality with multiple formats"""
+    if st.session_state.selected_papers.empty:
+        st.info("No papers selected for export")
+        return
+    
+    st.subheader("Export Options")
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button("📥 Export BibTeX"):
-            bibtex = "\n\n".join([p.to_bibtex() for p in st.session_state.selected_papers])
-            st.download_button(
-                label="Download BibTeX",
-                data=bibtex,
-                file_name=f"portfolio_{datetime.now().strftime('%Y%m%d')}.bib",
-                mime="text/plain"
-            )
+        # CSV Export
+        csv_data = st.session_state.selected_papers.to_csv(index=False)
+        st.download_button(
+            label="📄 Download CSV",
+            data=csv_data,
+            file_name=f"selected_papers_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
     
     with col2:
-        if st.button("📥 Export CSV"):
-            df = pd.DataFrame([p.to_dict() for p in st.session_state.selected_papers])
-            csv = df.to_csv(index=False)
-            st.download_button(
-                label="Download CSV",
-                data=csv,
-                file_name=f"portfolio_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
+        # JSON Export
+        json_data = st.session_state.selected_papers.to_json(
+            orient='records', 
+            indent=2, 
+            date_format='iso'
+        )
+        st.download_button(
+            label="📋 Download JSON",
+            data=json_data,
+            file_name=f"selected_papers_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            use_container_width=True
+        )
     
     with col3:
-        if st.button("🗑️ Clear Portfolio"):
-            st.session_state.selected_papers = []
+        # BibTeX Export (simplified)
+        def create_bibtex():
+            bibtex_entries = []
+            for _, row in st.session_state.selected_papers.iterrows():
+                # Create a simple BibTeX entry
+                title = row.get('title', 'Untitled').replace('{', '').replace('}', '')
+                authors = row.get('authors', 'Unknown')
+                year = row.get('year', 'Unknown')
+                doi = row.get('doi', '')
+                
+                entry_id = f"{authors.split(',')[0].replace(' ', '')}_{year}".lower()
+                entry = f"""@article{{{entry_id},
+    title = {{{title}}},
+    author = {{{authors}}},
+    year = {{{year}}},
+    doi = {{{doi}}}
+}}
+
+"""
+                bibtex_entries.append(entry)
+            
+            return ''.join(bibtex_entries)
+        
+        bibtex_data = create_bibtex()
+        st.download_button(
+            label="📚 Download BibTeX",
+            data=bibtex_data,
+            file_name=f"selected_papers_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.bib",
+            mime="text/plain",
+            use_container_width=True
+        )
+
+# -----------------------------
+# Main Application Interface
+# -----------------------------
+def main():
+    """Main application function"""
+    initialize_session_state()
+    
+    # Sidebar configuration
+    with st.sidebar:
+        st.title("🔬 Configuration")
+        
+        # API Keys section
+        st.subheader("API Keys (Optional)")
+        st.session_state.semantic_key = st.text_input(
+            "Semantic Scholar API Key",
+            value=st.session_state.semantic_key,
+            type="password",
+            help="Enter your Semantic Scholar API key for additional search results"
+        )
+        
+        # Search settings
+        st.subheader("Search Settings")
+        max_results_per_source = st.slider("Max results per source", 5, 50, 20)
+        
+        # Display search history
+        if st.session_state.search_history:
+            st.subheader("Recent Searches")
+            for query in st.session_state.search_history[-5:]:
+                if st.button(f"🔄 {query[:30]}...", key=f"hist_{query}"):
+                    st.session_state.current_query = query
+    
+    # Main navigation
+    page = st.sidebar.radio(
+        "📋 Navigation", 
+        ["🔍 Search", "📑 Selected Papers", "📊 Analytics"],
+        format_func=lambda x: x.split(" ", 1)[1]
+    )
+    
+    # Page routing
+    if "🔍 Search" in page:
+        render_search_page(max_results_per_source)
+    elif "📑 Selected Papers" in page:
+        render_selected_papers_page()
+    elif "📊 Analytics" in page:
+        render_analytics_page()
+
+def render_search_page(max_results_per_source: int):
+    """Render the search page"""
+    st.title("🔍 Literature Search")
+    st.markdown("---")
+    
+    # Search interface
+    col1, col2 = st.columns([4, 1])
+    
+    with col1:
+        query = st.text_input(
+            "Enter your search query:",
+            placeholder="e.g., machine learning in healthcare, quantum computing applications",
+            help="Enter keywords related to your research topic"
+        )
+    
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)  # Add spacing
+        search_button = st.button("🔍 Search", use_container_width=True)
+    
+    # Advanced search options
+    with st.expander("⚙️ Advanced Search Options"):
+        col1, col2 = st.columns(2)
+        with col1:
+            search_crossref = st.checkbox("Search CrossRef", value=True)
+            search_arxiv = st.checkbox("Search arXiv", value=True)
+        with col2:
+            search_semantic = st.checkbox(
+                "Search Semantic Scholar", 
+                value=bool(st.session_state.semantic_key),
+                disabled=not bool(st.session_state.semantic_key)
+            )
+            if not st.session_state.semantic_key:
+                st.caption("⚠️ Requires API key")
+    
+    # Perform search
+    if search_button and query:
+        validated_query = validate_search_query(query)
+        if validated_query:
+            # Add to search history
+            if validated_query not in st.session_state.search_history:
+                st.session_state.search_history.append(validated_query)
+            
+            # Show progress
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            results = []
+            total_sources = sum([search_crossref, search_arxiv, search_semantic])
+            current_source = 0
+            
+            # Search CrossRef
+            if search_crossref:
+                status_text.text("Searching CrossRef...")
+                progress_bar.progress(current_source / total_sources)
+                crossref_results = search_crossref(validated_query, max_results_per_source)
+                results.append(crossref_results)
+                current_source += 1
+                st.success(f"Found {len(crossref_results)} results from CrossRef")
+            
+            # Search arXiv
+            if search_arxiv:
+                status_text.text("Searching arXiv...")
+                progress_bar.progress(current_source / total_sources)
+                arxiv_results = search_arxiv(validated_query, max_results_per_source)
+                results.append(arxiv_results)
+                current_source += 1
+                st.success(f"Found {len(arxiv_results)} results from arXiv")
+            
+            # Search Semantic Scholar
+            if search_semantic and st.session_state.semantic_key:
+                status_text.text("Searching Semantic Scholar...")
+                progress_bar.progress(current_source / total_sources)
+                semantic_results = search_semantic_scholar(
+                    validated_query, 
+                    st.session_state.semantic_key, 
+                    max_results_per_source
+                )
+                results.append(semantic_results)
+                current_source += 1
+                st.success(f"Found {len(semantic_results)} results from Semantic Scholar")
+            
+            # Merge and display results
+            status_text.text("Processing results...")
+            progress_bar.progress(1.0)
+            
+            st.session_state.papers = merge_results(*results)
+            
+            # Clear progress indicators
+            progress_bar.empty()
+            status_text.empty()
+            
+            total_results = len(st.session_state.papers)
+            if total_results > 0:
+                st.success(f"🎉 Found {total_results} unique papers total")
+            else:
+                st.warning("No results found. Try adjusting your search terms.")
+    
+    # Display search results
+    if not st.session_state.papers.empty:
+        st.markdown("---")
+        st.subheader(f"📚 Search Results ({len(st.session_state.papers)} papers)")
+        
+        # Results summary
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            source_counts = st.session_state.papers['source'].value_counts()
+            st.metric("Sources", len(source_counts))
+        with col2:
+            year_range = st.session_state.papers['year'].dropna()
+            if not year_range.empty:
+                st.metric("Year Range", f"{int(year_range.min())}-{int(year_range.max())}")
+        with col3:
+            selected_count = len(st.session_state.selected_papers)
+            st.metric("Selected Papers", selected_count)
+        
+        # Display papers
+        for i, row in st.session_state.papers.iterrows():
+            with st.expander(
+                f"📄 {row['title'][:80]}{'...' if len(str(row['title'])) > 80 else ''} ({row['source']})"
+            ):
+                col1, col2 = st.columns([3, 1])
+                
+                with col1:
+                    st.write(f"**Authors:** {row['authors'] if row['authors'] else 'Not available'}")
+                    st.write(f"**Year:** {row['year'] if pd.notna(row['year']) else 'Not available'}")
+                    if row['doi']:
+                        st.write(f"**DOI:** {row['doi']}")
+                    
+                    abstract = row['abstract'] if row['abstract'] else "No abstract available"
+                    st.write(f"**Abstract:** {abstract}")
+                
+                with col2:
+                    if st.button(f"➕ Add to Selection", key=f"add_{i}"):
+                        # Check if already selected
+                        if not st.session_state.selected_papers.empty:
+                            existing_titles = st.session_state.selected_papers['title'].str.lower()
+                            if row['title'].lower() not in existing_titles.values:
+                                st.session_state.selected_papers = pd.concat([
+                                    st.session_state.selected_papers, 
+                                    pd.DataFrame([row])
+                                ], ignore_index=True)
+                                st.success("Added to selection!")
+                            else:
+                                st.warning("Already in selection")
+                        else:
+                            st.session_state.selected_papers = pd.DataFrame([row])
+                            st.success("Added to selection!")
+
+def render_selected_papers_page():
+    """Render the selected papers page"""
+    st.title("📑 Selected Papers")
+    st.markdown("---")
+    
+    if st.session_state.selected_papers.empty:
+        st.info("📭 No papers selected yet. Go to the Search page to find and select papers.")
+        return
+    
+    # Summary statistics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Papers", len(st.session_state.selected_papers))
+    with col2:
+        sources = st.session_state.selected_papers['source'].nunique()
+        st.metric("Unique Sources", sources)
+    with col3:
+        years = st.session_state.selected_papers['year'].dropna()
+        if not years.empty:
+            st.metric("Latest Year", int(years.max()))
+    with col4:
+        abstracts_available = st.session_state.selected_papers['abstract'].notna().sum()
+        st.metric("With Abstracts", abstracts_available)
+    
+    # Management buttons
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("🗑️ Clear All", use_container_width=True):
+            st.session_state.selected_papers = pd.DataFrame()
+            st.success("All papers cleared!")
             st.rerun()
     
-    st.divider()
+    with col2:
+        show_details = st.checkbox("Show Details", value=False)
+    
+    with col3:
+        sort_option = st.selectbox("Sort by", ["Year (Desc)", "Year (Asc)", "Title", "Source"])
+    
+    # Sort papers
+    df_display = st.session_state.selected_papers.copy()
+    if sort_option == "Year (Desc)":
+        df_display = df_display.sort_values('year', ascending=False, na_last=True)
+    elif sort_option == "Year (Asc)":
+        df_display = df_display.sort_values('year', ascending=True, na_last=False)
+    elif sort_option == "Title":
+        df_display = df_display.sort_values('title', ascending=True, na_last=True)
+    elif sort_option == "Source":
+        df_display = df_display.sort_values('source', ascending=True, na_last=True)
     
     # Display papers
-    for idx, paper in enumerate(st.session_state.selected_papers, 1):
-        with st.container():
-            col1, col2 = st.columns([5, 1])
-            
-            with col1:
-                st.markdown(f"**{idx}. {paper.title}**")
-                st.caption(f"{', '.join(paper.authors[:3]) if paper.authors else 'No authors'} | "
-                          f"{paper.year} | {paper.source}")
-            
-            with col2:
-                if st.button("Remove", key=f"remove_{idx}"):
-                    st.session_state.selected_papers.pop(idx-1)
-                    st.rerun()
-
-def render_settings_page():
-    """Render settings page."""
-    st.header("⚙️ Settings & System Status")
+    st.markdown("---")
     
-    st.subheader("🔌 API Status")
-    
-    # Check which APIs are available
-    api_checks = {
-        "Semantic Scholar": "✅ Active" if REQUESTS_AVAILABLE else "❌ Requires 'requests'",
-        "CrossRef": "✅ Active" if REQUESTS_AVAILABLE else "❌ Requires 'requests'",
-        "arXiv": "✅ Active" if (REQUESTS_AVAILABLE and (FEEDPARSER_AVAILABLE or ARXIV_LIB_AVAILABLE)) else "⚠️ Limited (install feedparser for full support)",
-        "PubMed": "✅ Active" if (REQUESTS_AVAILABLE and XML_AVAILABLE) else "⚠️ Limited",
-        "DOAJ": "✅ Active" if REQUESTS_AVAILABLE else "❌ Requires 'requests'",
-        "Google Scholar": "✅ Available" if SCHOLARLY_AVAILABLE else "❌ Install 'scholarly' (often blocked anyway)"
-    }
-    
-    for api, status in api_checks.items():
-        if "✅" in status:
-            st.success(f"{status} - {api}")
-        elif "⚠️" in status:
-            st.warning(f"{status} - {api}")
-        else:
-            st.error(f"{status} - {api}")
-    
-    st.divider()
-    
-    st.subheader("📦 Package Status")
-    
-    packages = {
-        "requests": REQUESTS_AVAILABLE,
-        "feedparser": FEEDPARSER_AVAILABLE,
-        "plotly": PLOTLY_AVAILABLE,
-        "arxiv": ARXIV_LIB_AVAILABLE,
-        "scholarly": SCHOLARLY_AVAILABLE
-    }
-    
-    for package, available in packages.items():
-        if available:
-            st.write(f"✅ {package} - Installed")
-        else:
-            st.write(f"❌ {package} - Not installed")
-    
-    st.divider()
-    
-    st.subheader("📖 Instructions")
-    
-    st.markdown("""
-    ### To install missing packages:
-    
-    ```bash
-    pip install requests feedparser plotly arxiv scholarly
-    ```
-    
-    ### About the databases:
-    
-    - **Semantic Scholar**: AI-powered search with citation context
-    - **CrossRef**: Comprehensive DOI registry
-    - **arXiv**: Preprints in physics, math, CS, engineering
-    - **PubMed**: Biomedical and life sciences
-    - **DOAJ**: Open access journals
-    - **Google Scholar**: Broad coverage (often blocked)
-    
-    ### Tips for better search results:
-    
-    1. Use specific technical terms
-    2. Include methodology keywords (e.g., "deep learning", "finite element")
-    3. Try different combinations of databases
-    4. Adjust year range for recent or historical papers
-    5. Increase results per database for comprehensive search
-    """)
-
-if __name__ == "__main__":
-    if not REQUESTS_AVAILABLE:
-        st.error("""
-        # ❌ Critical Error: Missing Required Package
-        
-        The 'requests' package is required but not installed.
-        
-        ## Please install it by running:
-        ```bash
-        pip install requests
-        ```
-        
-        ## Or install all requirements:
-        ```bash
-        pip install requests feedparser pandas numpy plotly
-        ```
-        
-        After installation, refresh this page.
-        """)
+    if show_details:
+        # Detailed view
+        for i, (idx, row) in enumerate(df_display.iterrows()):
+            with st.expander(f"📄 {row['title']}", expanded=False):
+                col1, col2 = st.columns([4, 1])
+                
+                with col1:
+                    st.write(f"**Authors:** {row['authors'] if row['authors'] else 'Not available'}")
+                    st.write(f"**Year:** {row['year'] if pd.notna(row['year']) else 'Not available'}")
+                    st.write(f"**Source:** {row['source']}")
+                    if row['doi']:
+                        st.write(f"**DOI:** {row['doi']}")
+                    if row['abstract']:
+                        st.write(f"**Abstract:** {row['abstract']}")
+                
+                with col2:
+                    if st.button(f"❌ Remove", key=f"remove_{idx}"):
+                        st.session_state.selected_papers = st.session_state.selected_papers.drop(idx).reset_index(drop=True)
+                        st.success("Paper removed!")
+                        st.rerun()
     else:
-        main()
+        # Table view
+        display_columns = ['title', 'authors', 'year', 'source']
+        st.dataframe(
+            df_display[display_columns],
+            use_container_width=True,
+            height=400
+        )
+    
+    # Export section
+    st.markdown("---")
+    export_selected_papers()
+
+def render_analytics_page():
+    """Render the analytics page"""
+    st.title("📊 Analytics Dashboard")
+    st.markdown("---")
+    
+    if st.session_state.selected_papers.empty:
+        st.info("📭 No papers selected for analysis. Go to the Search page to find and select papers.")
+        return
+    
+    df = st.session_state.selected_papers
+    
+    # Analytics summary
+    st.subheader("📈 Overview")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Papers", len(df))
+    with col2:
+        abstracts_count = df['abstract'].notna().sum()
+        st.metric("Papers with Abstracts", f"{abstracts_count}/{len(df)}")
+    with col3:
+        unique_authors = set()
+        for authors in df['authors'].dropna():
+            unique_authors.update([a.strip() for a in str(authors).split(',')])
+        st.metric("Unique Authors", len(unique_authors))
+    with col4:
+        year_span = df['year'].dropna()
+        if not year_span.empty:
+            span = int(year_span.max()) - int(year_span.min()) + 1
+            st.metric("Year Span", f"{span} years")
+    
+    # Analytics tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["🔤 Keywords", "📅 Timeline", "🎯 Clusters", "🔗 Similarity"])
+    
+    with tab1:
+        st.subheader("Keyword Frequency Analysis")
+        plot_keyword_frequency(df)
+    
+    with tab2:
+        st.subheader("Publication Timeline")
+        plot_publication_trend(df)
+    
+    with tab3:
+        st.subheader("Topic Clustering")
+        plot_topic_clusters(df)
+    
+    with tab4:
+        st.subheader("Document Similarity Analysis")
+        plot_similarity_heatmap(df)
+
+# -----------------------------
+# Application Entry Point
+# -----------------------------
+if __name__ == "__main__":
+    main()
