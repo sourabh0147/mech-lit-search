@@ -1,7 +1,22 @@
-streamlit
-pandas
-numpy
-requests
-matplotlib
-scikit-learn
-wordcloud
+# Core
+streamlit>=1.29.0
+pandas>=2.2.3
+numpy>=2.0.0
+requests>=2.32.0
+beautifulsoup4>=4.13.0
+lxml>=5.3.0
+arxiv>=2.2.0
+gitpython>=3.1.35
+altair>=5.2.0
+plotly>=5.22.0
+
+# Analytics & Visualization
+matplotlib>=3.9.0
+wordcloud>=1.9.3
+scikit-learn>=1.5.0
+scipy>=1.14.0
+
+# Utils
+rich>=13.7.0
+pyarrow>=15.0.0
+watchdog>=4.0.0
