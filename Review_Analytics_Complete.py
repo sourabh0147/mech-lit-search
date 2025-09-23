@@ -2,173 +2,140 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import time
 import matplotlib.pyplot as plt
-from wordcloud import WordCloud
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
+from wordcloud import WordCloud
 
 st.set_page_config(page_title="Literature Search & Analytics", layout="wide")
 
-# -----------------------------
-# Session State Initialization
-# -----------------------------
-if "papers" not in st.session_state:
-    st.session_state.papers = pd.DataFrame()
-if "selected_papers" not in st.session_state:
-    st.session_state.selected_papers = pd.DataFrame()
-if "semantic_key" not in st.session_state:
-    st.session_state.semantic_key = ""
+# -------------------------
+# Retry-enabled CrossRef Search
+# -------------------------
+def search_crossref(query, limit=50, retries=3):
+    url = f"https://api.crossref.org/works?query={query}&rows={limit}"
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, timeout=20)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("message", {}).get("items", [])
+        except requests.exceptions.Timeout:
+            if attempt < retries - 1:
+                time.sleep(2)
+            else:
+                st.error("CrossRef search timed out after multiple attempts.")
+                return []
+        except Exception as e:
+            st.error(f"CrossRef error: {e}")
+            return []
 
-# -----------------------------
-# Helper Functions
-# -----------------------------
-def search_crossref(query, rows=20):
-    url = f"https://api.crossref.org/works?query={query}&rows={rows}"
+# -------------------------
+# ArXiv Search
+# -------------------------
+def search_arxiv(query, limit=50):
     try:
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            items = r.json()["message"]["items"]
-            return [
-                {
-                    "title": i.get("title", [""])[0],
-                    "authors": ", ".join([a.get("family", "") for a in i.get("author", [])]) if "author" in i else "",
-                    "year": i.get("issued", {}).get("date-parts", [[None]])[0][0],
-                    "doi": i.get("DOI", ""),
-                    "abstract": i.get("abstract", ""),
-                    "source": "CrossRef",
-                }
-                for i in items
-            ]
-    except:
+        url = f"http://export.arxiv.org/api/query?search_query=all:{query}&start=0&max_results={limit}"
+        response = requests.get(url, timeout=20)
+        response.raise_for_status()
+        return response.text  # You can parse XML if needed
+    except Exception as e:
+        st.error(f"ArXiv error: {e}")
         return []
-    return []
 
-def search_arxiv(query, max_results=20):
-    url = f"http://export.arxiv.org/api/query?search_query=all:{query}&start=0&max_results={max_results}"
-    try:
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(r.content)
-            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+# -------------------------
+# Sidebar Navigation
+# -------------------------
+menu = st.sidebar.radio("Navigation", ["Search", "Selected Papers", "Analytics"])
+
+if 'selected_papers' not in st.session_state:
+    st.session_state.selected_papers = []
+
+# -------------------------
+# Search Page
+# -------------------------
+if menu == "Search":
+    st.title("🔍 Literature Search")
+    query = st.text_input("Enter your search query")
+    crossref_enabled = st.checkbox("Search CrossRef", value=True)
+    arxiv_enabled = st.checkbox("Search ArXiv", value=True)
+    max_results = st.slider("Max results per source", 10, 100, 50, 10)
+
+    if st.button("Search"):
+        if not query.strip():
+            st.warning("Please enter a valid search query.")
+        else:
             results = []
-            for entry in root.findall('atom:entry', ns):
-                results.append({
-                    "title": entry.find('atom:title', ns).text.strip(),
-                    "authors": ", ".join([a.text for a in entry.findall('atom:author/atom:name', ns)]),
-                    "year": entry.find('atom:published', ns).text[:4],
-                    "doi": entry.find('atom:id', ns).text,
-                    "abstract": entry.find('atom:summary', ns).text.strip(),
-                    "source": "arXiv",
-                })
-            return results
-    except:
-        return []
-    return []
+            if crossref_enabled:
+                st.info("Fetching results from CrossRef...")
+                crossref_results = search_crossref(query, max_results)
+                results.extend(crossref_results)
+            if arxiv_enabled:
+                st.info("Fetching results from ArXiv...")
+                arxiv_results = search_arxiv(query, max_results)
+                results.extend(arxiv_results if isinstance(arxiv_results, list) else [])
 
-def merge_results(*args):
-    df = pd.DataFrame([x for lst in args for x in lst])
-    if df.empty:
-        return df
-    return df.drop_duplicates(subset=["title"])  # deduplicate by title
+            if results:
+                for i, paper in enumerate(results):
+                    title = paper.get("title", ["Untitled"])[0] if isinstance(paper, dict) else str(paper)
+                    with st.container():
+                        st.markdown(f"**{i+1}. {title}**")
+                        if isinstance(paper, dict):
+                            st.caption(paper.get("DOI", "No DOI"))
+                        if st.button(f"Add {i+1}", key=f"add_{i}"):
+                            st.session_state.selected_papers.append(title)
+            else:
+                st.warning("No results found.")
 
-# -----------------------------
-# Analytics Functions
-# -----------------------------
-def plot_keyword_frequency(df):
-    text = " ".join(df["abstract"].fillna(""))
-    words = pd.Series(text.split()).value_counts().head(20)
-    fig, ax = plt.subplots(figsize=(8,4))
-    words.plot(kind='bar', ax=ax)
-    ax.set_title("Top Keywords")
-    st.pyplot(fig)
-    wc = WordCloud(width=600, height=300, background_color='white').generate(text)
-    st.image(wc.to_array(), caption="WordCloud of Keywords")
-
-def plot_publication_trend(df):
-    trend = df['year'].value_counts().sort_index()
-    fig, ax = plt.subplots(figsize=(6,3))
-    trend.plot(ax=ax)
-    ax.set_title("Publication Trend")
-    ax.set_xlabel("Year")
-    st.pyplot(fig)
-
-def plot_topic_clusters(df):
-    if df['abstract'].dropna().empty:
-        st.info("No abstracts available for clustering")
-        return
-    vectorizer = TfidfVectorizer(stop_words='english', max_features=500)
-    X = vectorizer.fit_transform(df['abstract'].fillna(""))
-    kmeans = KMeans(n_clusters=min(5, len(df)), random_state=42)
-    labels = kmeans.fit_predict(X)
-    df['cluster'] = labels
-    st.write("Cluster counts:", df['cluster'].value_counts())
-
-def plot_similarity_heatmap(df):
-    if df['abstract'].dropna().empty:
-        st.info("No abstracts available for similarity heatmap")
-        return
-    vectorizer = TfidfVectorizer(stop_words='english')
-    X = vectorizer.fit_transform(df['abstract'].fillna(""))
-    sim_matrix = cosine_similarity(X)
-    fig, ax = plt.subplots(figsize=(5,5))
-    cax = ax.imshow(sim_matrix, cmap='viridis')
-    ax.set_title("Similarity Heatmap")
-    fig.colorbar(cax)
-    st.pyplot(fig)
-
-# -----------------------------
-# Sidebar & Navigation
-# -----------------------------
-page = st.sidebar.radio("Navigation", ["Search", "Selected Papers", "Analytics"])
-
-with st.sidebar:
-    st.subheader("Optional API Keys")
-    st.session_state.semantic_key = st.text_input("Semantic Scholar API Key", value=st.session_state.semantic_key)
-
-# -----------------------------
-# Main Pages
-# -----------------------------
-if page == "Search":
-    st.title("Literature Search")
-    query = st.text_input("Enter search query")
-    if st.button("Search") and query:
-        with st.spinner("Searching papers..."):
-            crossref_results = search_crossref(query)
-            arxiv_results = search_arxiv(query)
-            st.session_state.papers = merge_results(crossref_results, arxiv_results)
-        st.success(f"Found {len(st.session_state.papers)} papers")
-
-    if not st.session_state.papers.empty:
-        for i, row in st.session_state.papers.iterrows():
-            with st.expander(f"{row['title']} ({row['source']})"):
-                st.write(f"**Authors:** {row['authors']}")
-                st.write(f"**Year:** {row['year']}")
-                st.write(row['abstract'] if row['abstract'] else "No abstract available")
-                if st.button(f"Add {i}", key=f"add_{i}"):
-                    st.session_state.selected_papers = pd.concat([st.session_state.selected_papers, pd.DataFrame([row])], ignore_index=True)
-
-elif page == "Selected Papers":
-    st.title("Selected Papers")
-    if st.session_state.selected_papers.empty:
-        st.info("No papers selected")
+# -------------------------
+# Selected Papers
+# -------------------------
+if menu == "Selected Papers":
+    st.title("📄 Selected Papers")
+    if st.session_state.selected_papers:
+        st.write(st.session_state.selected_papers)
+        if st.button("Clear Selection"):
+            st.session_state.selected_papers = []
     else:
-        st.dataframe(st.session_state.selected_papers[['title','authors','year','source']])
-        st.download_button("Download CSV", st.session_state.selected_papers.to_csv(index=False), "selected_papers.csv")
+        st.info("No papers selected yet.")
 
-elif page == "Analytics":
-    st.title("Analytics")
-    df = st.session_state.selected_papers
-    if df.empty:
-        st.info("Please select papers first")
+# -------------------------
+# Analytics
+# -------------------------
+if menu == "Analytics":
+    st.title("📊 Analytics")
+    if st.session_state.selected_papers:
+        text_data = " ".join(st.session_state.selected_papers)
+
+        # Keyword frequency
+        vectorizer = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform(st.session_state.selected_papers)
+        feature_names = vectorizer.get_feature_names_out()
+        freqs = np.asarray(tfidf_matrix.sum(axis=0)).flatten()
+        freq_df = pd.DataFrame({'keyword': feature_names, 'frequency': freqs}).sort_values(by='frequency', ascending=False).head(20)
+
+        st.subheader("Top Keywords")
+        st.bar_chart(freq_df.set_index('keyword'))
+
+        # Wordcloud
+        wc = WordCloud(width=800, height=400, background_color='white').generate(text_data)
+        st.subheader("Wordcloud")
+        st.image(wc.to_array(), use_container_width=True)
+
+        # Topic Clustering
+        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+        clusters = kmeans.fit_predict(tfidf_matrix)
+        st.subheader("Topic Clusters")
+        st.write(pd.DataFrame({"Paper": st.session_state.selected_papers, "Cluster": clusters}))
+
+        # Similarity Heatmap
+        sim_matrix = cosine_similarity(tfidf_matrix)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        cax = ax.matshow(sim_matrix, cmap='coolwarm')
+        plt.title("Similarity Heatmap", pad=20)
+        plt.colorbar(cax)
+        st.pyplot(fig)
     else:
-        tab1, tab2, tab3, tab4 = st.tabs(["Keyword Frequency", "Publication Trend", "Topic Clusters", "Similarity Heatmap"])
-        with tab1:
-            plot_keyword_frequency(df)
-        with tab2:
-            plot_publication_trend(df)
-        with tab3:
-            plot_topic_clusters(df)
-        with tab4:
-            plot_similarity_heatmap(df)
+        st.info("Please select papers first.")
